@@ -1,0 +1,7 @@
+{
+  "JAKA_AGENT_BASE_URL": "http://127.0.0.1:8001/v1",
+  "JAKA_AGENT_MODEL": "Qwen3.5-9B",
+  "DASHSCOPE_BASE_URL": "http://127.0.0.1:8000/v1",
+  "QWEN_PLAN_MODEL": "/root/Model/MiniCPM-V-4.6",
+  "QWEN_VISION_MODEL": "/root/Model/MiniCPM-V-4.6"
+}

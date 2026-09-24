@@ -1,0 +1,3 @@
+# Preserve source snapshot bytes, including line endings, on the first commit.
+* -text
+SNAPSHOT.json text eol=lf

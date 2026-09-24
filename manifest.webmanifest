@@ -1,0 +1,21 @@
+{
+  "id": "/",
+  "name": "JAKA Vision 移动机器人",
+  "short_name": "JAKA Vision",
+  "description": "JAKA 移动机器人语音与视觉控制终端",
+  "lang": "zh-CN",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#f6f7f8",
+  "theme_color": "#f6f7f8",
+  "icons": [
+    {
+      "src": "/pwa-icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

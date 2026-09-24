@@ -1,0 +1,32 @@
+# Local credentials and environments
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+id_rsa*
+id_ed25519*
+.ssh/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+# Runtime data and captured images (maps remain tracked)
+*.log
+*.pid
+web_captures/
+web_references/
+web_videos/
+web_audio/
+received_frames/
+obs_ann*.png
+shot.jpg
+robot_tracks.json
+*.wav
+*.mp4
+
+# Local tooling
+.codex-tmp/
+.DS_Store
+Thumbs.db
