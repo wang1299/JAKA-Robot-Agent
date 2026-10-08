@@ -505,6 +505,9 @@ class AgentServiceMixin:
             # absent upload can answer questions about a saved environment.
             del tools["inspect_reference"]
         def remember(name, arguments, result):
+            observer = getattr(self, "record_agent_tool", None)
+            if observer:
+                observer(name, arguments, result, session_id)
             if store:
                 # Avoid recursively embedding previously recalled records into new records.
                 saved_result = ({'record_sequences': [r['seq'] for r in result.get('items', [])]}
@@ -535,7 +538,7 @@ class AgentServiceMixin:
                     "snapshot": result.get("snapshot"), "selection": result.get("selection"),
                     "capture_id": result.get("capture_id"), "observed_at": result.get("observed_at")}
 
-        if self.mock:
+        if self.mock and not getattr(self, "replay", False):
             return {"text": "当前为模拟模式，没有连接模型或操作真实机器人。", "tool_trace": [], "target_ids": []}
         from jaka_agent.storage.memory import compact_record
         return agent_runner.AgentRunner(self.agent_complete, tools, native=True, require_final_tool=True,

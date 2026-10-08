@@ -100,6 +100,20 @@
     "src/jaka_agent/web/static/pwa-icon.svg",
     "src/jaka_agent/web/static/service-worker.js",
     "src/jaka_agent/web/templates/index.html",
-    "src/jaka_agent/web/templates/scene_viewer.html"
+    "src/jaka_agent/web/templates/scene_viewer.html",
+    "src/jaka_agent/replay/__init__.py",
+    "src/jaka_agent/replay/fixtures.py",
+    "src/jaka_agent/replay/state.py",
+    "src/jaka_agent/web/templates/replay.html",
+    "src/jaka_agent/web/static/css/replay.css",
+    "src/jaka_agent/web/static/js/replay.js",
+    "docs/agent.md",
+    "docs/embodied.md",
+    "docs/replay.md",
+    "docs/architecture.md",
+    "docs/hardware.md",
+    "docs/testing.md",
+    "CONTRIBUTING.md",
+    "tools/evaluate_agent.py"
   ]
 }

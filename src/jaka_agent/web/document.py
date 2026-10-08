@@ -17,11 +17,11 @@ def _document() -> bytes:
   <meta name="theme-color" content="#f6f7f8">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="default">
-  <meta name="apple-mobile-web-app-title" content="JAKA Vision">
+  <meta name="apple-mobile-web-app-title" content="JAKA Robot Agent">
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="icon" href="/pwa-icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="/pwa-icon.svg">
-  <title>JAKA Vision</title>
+  <title>JAKA Robot Agent</title>
 </head>
 <body>
 """

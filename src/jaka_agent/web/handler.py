@@ -106,6 +106,20 @@ class RobotWebHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         request_url = urlparse(self.path)
         path = request_url.path
+        if path in {"/replay", "/api/replay"}:
+            if not getattr(self.state, "replay", False):
+                self._error("请使用 --replay 启动任务回放", HTTPStatus.NOT_FOUND)
+                return
+            if path == "/replay":
+                from jaka_agent.paths import TEMPLATES_DIR
+                self._send_bytes((TEMPLATES_DIR / "replay.html").read_bytes(), "text/html; charset=utf-8")
+            else:
+                try:
+                    cid = (parse_qs(request_url.query).get("conversation_id") or [None])[0]
+                    self._send_json(self.state.replay_snapshot(cid))
+                except ValueError as exc:
+                    self._error(exc)
+            return
         if path == '/api/conversation/media':
             query = parse_qs(request_url.query)
             try:
@@ -139,6 +153,8 @@ class RobotWebHandler(BaseHTTPRequestHandler):
             "/static/css/scene.css": (STATIC_DIR / "css/scene.css", "text/css; charset=utf-8"),
             "/static/js/app.js": (STATIC_DIR / "js/app.js", "text/javascript; charset=utf-8"),
             "/static/js/scene.js": (STATIC_DIR / "js/scene.js", "text/javascript; charset=utf-8"),
+            "/static/css/replay.css": (STATIC_DIR / "css/replay.css", "text/css; charset=utf-8"),
+            "/static/js/replay.js": (STATIC_DIR / "js/replay.js", "text/javascript; charset=utf-8"),
 
             "/manifest.webmanifest": (web_settings.PWA_MANIFEST_PATH, "application/manifest+json; charset=utf-8"),
             "/service-worker.js": (web_settings.SERVICE_WORKER_PATH, "text/javascript; charset=utf-8"),
@@ -158,7 +174,7 @@ class RobotWebHandler(BaseHTTPRequestHandler):
                 self._error(f"三维拟物体查看页不可用: {exc}", HTTPStatus.NOT_FOUND)
             return
         if path == "/api/health":
-            self._send_json({"ok": True, "mock": self.state.mock})
+            self._send_json({"ok": True, "mock": self.state.mock, "replay": bool(getattr(self.state, "replay", False))})
             return
         if path == "/api/skills":
             self._send_json({"skills": agent_skills.skill_catalog()})
@@ -291,6 +307,16 @@ class RobotWebHandler(BaseHTTPRequestHandler):
         request_url = urlparse(self.path)
         path = request_url.path
         try:
+            if path in {"/api/replay/plan", "/api/replay/feedback"}:
+                if not getattr(self.state, "replay", False):
+                    self._error("此接口仅在任务回放模式可用", HTTPStatus.NOT_FOUND)
+                    return
+                payload = self._read_json()
+                if path.endswith("/plan"):
+                    self._send_json(self.state.begin_replay(payload.get("case_id"), payload.get("conversation_id")))
+                else:
+                    self._send_json(self.state.replay_feedback(payload.get("conversation_id")))
+                return
             if path == "/api/audio/transcribe":
                 audio_bytes = self._read_mobile_audio()
                 self._send_json(self.state.transcribe_mobile_audio(audio_bytes))

@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Agent 与机器人任务回放 · JAKA Robot Agent</title>
+  <link rel="icon" href="/pwa-icon.svg"><link rel="stylesheet" href="/static/css/replay.css">
+  <script src="/static/js/replay.js" defer></script>
+</head>
+<body>
+<header class="site-header"><a href="/" class="brand"><span class="brand-mark">J</span> JAKA Robot Agent</a><a href="/">打开完整任务终端 ↗</a></header>
+<main>
+  <section class="intro">
+    <div class="eyebrow">AGENT × EMBODIED ROBOTICS</div>
+    <h1>从语言意图，到机器人行动</h1>
+    <p>Agent 查询环境证据、选择技能并生成计划；机器人执行动作、获取观察，再把真实执行状态交回 Agent。</p>
+    <div class="flow" aria-label="任务过程"><span>理解需求</span><b>→</b><span>核对地图与资源</span><b>→</b><span>确认计划</span><b>→</b><span>行动与观察</span><b>→</b><span>结果反馈</span></div>
+  </section>
+  <section class="scenario-bar" aria-label="选择回放案例">
+    <div><label for="caseSelect">体验一个任务</label><select id="caseSelect"><option value="find_object">参考图寻物</option><option value="welcome">迎宾与人工确认</option><option value="blocked">导航失败反馈</option><option value="missing_reference">缺少参考图</option></select></div>
+    <p id="caseDescription">加载案例说明…</p><button id="planButton" class="primary">让 Agent 生成计划</button>
+  </section>
+  <p id="modeNotice" class="mode-notice" role="status">正在连接任务回放服务…</p>
+  <p id="errorMessage" class="error" role="alert" hidden></p>
+  <div class="workspace">
+    <section class="panel agent-panel">
+      <div class="panel-heading"><span class="actor-icon agent-icon">A</span><div><h2>Agent</h2><p>环境证据 · 技能选择 · 任务计划</p></div><span class="actor-label">决策主体</span></div>
+      <div id="agentAnswer" class="answer">选择案例后，查看 Agent 如何调用工具生成任务计划。</div>
+      <div id="referenceBox" class="reference" hidden><img id="referenceImage" alt="案例提供的合成参考图"><div><strong>任务参考图</strong><p>预设几何图形，供回放流程使用。</p></div></div>
+      <div class="section-title"><h3>计划步骤</h3><span id="taskStatus">尚未生成</span></div>
+      <ol id="planSteps" class="steps"><li>资源核对后展示待确认计划</li></ol>
+      <div class="task-actions"><button id="executeButton" class="primary" disabled>确认计划并执行</button><button id="cancelButton" disabled>停止任务</button></div>
+      <div class="section-title"><h3>工具调用记录</h3><span>依据可用资源生成</span></div>
+      <ol id="agentEvents" class="timeline"><li class="empty">等待 Agent 查询</li></ol>
+    </section>
+    <section class="panel robot-panel">
+      <div class="panel-heading"><span class="actor-icon robot-icon">R</span><div><h2>Robot</h2><p>位置反馈 · 动作执行 · 到点观察</p></div><span class="actor-label">执行主体</span></div>
+      <div class="map-heading"><strong>演示语义地图</strong><span><i class="legend-dot"></i> 机器人当前位置</span></div>
+      <svg id="worldMap" viewBox="0 0 560 290" role="img" aria-label="机器人在演示地图上的位置"></svg>
+      <div id="robotPose" class="pose">当前位置：等待服务</div>
+      <div id="observationBox" class="observation" hidden><img id="observationImage" alt="合成的到点观察样例"><p id="observationText"></p></div>
+      <div id="guestActions" class="guest-actions" hidden><strong>请主人核对当前候选照片</strong><p>确认后才会引导至送客点。</p><div><button id="acceptGuestButton" class="primary">确认是访客，继续</button><button id="rejectGuestButton">不是访客，继续等待</button></div></div>
+      <ol id="robotEvents" class="timeline"><li class="empty">等待确认后执行</li></ol>
+    </section>
+  </div>
+  <section class="feedback-panel"><div><div class="eyebrow">EXECUTION FEEDBACK</div><h2>让执行结果回到 Agent</h2><p id="executionResult">计划需要确认后执行；执行失败或取消会保留实际状态。</p></div><button id="feedbackButton" disabled>让 Agent 汇报执行结果</button><p id="feedbackAnswer" aria-live="polite"></p></section>
+  <footer>此页面展示任务契约、确认与反馈流程。合成场景和预设决策用于演示，模型能力与实机效果需要独立评测。</footer>
+</main>
+</body></html>

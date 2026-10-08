@@ -1,10 +1,19 @@
 # JAKA Robot Agent
 
-面向 JAKA 移动机器人的多模态任务助手。用户通过网页输入指令或上传参考图，Agent 查询语义地图、选择机器人技能并生成待确认计划；确认后由执行器完成导航、拍照、视觉比对和结果汇报。
+**让 Agent 理解任务，让机器人在环境中行动。** 面向 JAKA 移动机器人的多模态具身任务系统：Agent 根据语言、参考图和语义地图选择技能、生成计划；机器人导航、获取现场观察并更新任务结果，Agent 再根据执行状态汇报。
 
-适合研究和开发服务机器人应用：把“去某个地点”“找照片里的物品”“接到访客并带到指定位置”等需求，连接到可观察、可取消的实际任务。没有硬件也可以启动网页体验界面，并运行离线测试。
+适合服务机器人应用开发、Agent 工具调用与任务执行研究。通过寻物和迎宾两类任务，展示语言目标如何落到地图点位、机器人动作与视觉证据。**没有机器人或 GPU，也能运行完整任务回放**，查看工具调用、计划确认、移动轨迹、观察结果和任务反馈。
 
-[演示视频](docs/demos.md) · [快速开始](#快速开始) · [系统设计](docs/architecture.md) · [模型部署](docs/models.md) · [实机部署](docs/deployment.md) · [硬件准备](docs/hardware.md) · [测试说明](docs/testing.md)
+[任务回放](docs/replay.md) · [演示视频](docs/demos.md) · [Agent 设计](docs/agent.md) · [机器人与具身任务](docs/embodied.md) · [模型部署](docs/models.md) · [实机部署](docs/deployment.md) · [参与开发](CONTRIBUTING.md)
+
+## 两个主体如何协作
+
+| 主体 | 输入 | 负责什么 | 可核对的输出 |
+| --- | --- | --- | --- |
+| Agent | 用户需求、参考图、地图与工具结果 | 查询环境证据、选择技能、补问缺失信息、生成计划、汇报执行状态 | 工具调用记录、待确认任务卡、结果回复 |
+| Robot | 用户确认后的技能计划 | 导航、现场拍照、视觉比对、等待访客确认、响应停止 | 轨迹、带来源的观察、任务状态与发现位置 |
+
+寻物中，执行器会根据观察继续搜索或结束；迎宾中，机器人会等待主人确认候选照片再引导。当前实现采用 **LLM 工具调用 + 技能执行器**，高层计划需要用户确认；不包含端到端 VLA 策略训练或模型自主循环重规划。
 
 ## 演示
 
@@ -48,7 +57,7 @@
 
 ## 快速开始
 
-下面启动的是 **Mock 界面模式**，不连接机器人、相机、麦克风或模型。它提供模拟状态和部分任务流程，Agent 对话为模拟回复，不是完整的离线大模型或机器人仿真。
+先启动 **Agent 与机器人任务回放**：不连接硬件或模型，使用预设工具决策和合成观察样例，复用实际 AgentRunner、技能校验、任务确认和取消机制。回放中的导航与视觉反馈由适配器提供，用于理解和验证任务流程。
 
 需要 Python 3.11 或更新版本；本地离线验证使用 Python 3.13，前端检查使用 Node.js。硬件 SDK 的 Python 版本要求需另行核对。
 
@@ -62,12 +71,12 @@ python -m venv .venv
 
 ```bash
 python -m pip install -e .
-jaka-agent --mock --host 127.0.0.1 --port 8080
+jaka-agent --replay --port 8080
 ```
 
-打开 [http://127.0.0.1:8080](http://127.0.0.1:8080)。可浏览地图、技能、会话及任务界面；涉及真实照片的功能需要相机或自行提供测试图片。
+打开 [http://127.0.0.1:8080/replay](http://127.0.0.1:8080/replay)，选择“参考图寻物”或“迎宾与人工确认”，依次点击生成计划、确认执行、汇报结果。也可体验导航失败、缺少参考图和运行中停止。
 
-也可使用 `python -m jaka_agent --mock`；原来的 `python robot_web.py --mock` 启动方式仍可用。
+也可使用 `python -m jaka_agent --replay` 或 `python robot_web.py --replay`。完整任务终端位于 `/`；原有 `--mock` 保留为界面开发模式。模式区别和接入真实决策模型的方法见[回放说明](docs/replay.md)。
 
 要使用真实 Agent，需要配置双模型服务：Qwen3.5 9B 负责 Agent 决策，MiniCPM V 4.6 负责视觉分析与部分任务规划，当前均使用 Transformers Serve。仓库提供 GPU 环境安装、权重下载、启动、SSH 隧道和合成输入验收代码，完整步骤见[模型部署](docs/models.md)。语音模型与外部在线建图模型按需部署。端口和模型名称需要匹配实际服务；实际服务器连接信息只保存在被 Git 忽略的本地配置中。
 
@@ -84,7 +93,9 @@ flowchart LR
     Executor --> Nav[底盘导航]
     Executor --> Vision[相机与视觉模型]
     Web --> Store[SQLite 会话与媒体]
-    Executor --> Web
+    Executor --> Feedback[动作状态与视觉证据]
+    Feedback --> Web
+    Web --> Report[Agent 查询状态并汇报]
 ```
 
 ```text
@@ -94,6 +105,7 @@ JAKA-Robot-Agent/
 │   ├── tasks/          # 任务管理、寻物、迎宾、巡逻、执行器
 │   ├── hardware/       # 底盘、相机、语音、音频适配
 │   ├── models/         # 模型配置、客户端、视觉分析
+│   ├── replay/         # 无硬件任务回放、合成观察与决策样例
 │   ├── storage/        # 会话数据库与媒体归档
 │   ├── mapping/        # 建图、场景图、地图管理
 │   ├── web/            # HTTP 接口、页面、独立 CSS/JS
@@ -116,10 +128,11 @@ JAKA-Robot-Agent/
 ```bash
 python -m pip install -e ".[dev]"
 python tools/run_offline_checks.py --require-node
+python tools/evaluate_agent.py --mode replay
 python tools/build_pi_release.py
 ```
 
-离线检查包含 **359 项 Python 测试和 4 组前端检查**：本地 Windows 环境中 355 项 Python 测试通过，3 项服务器存档夹具检查和 1 项 Linux 隧道进程检查跳过，4 组前端检查通过。CI 在 Linux 上运行隧道检查。不调用真实模型、不驱动机器人；检查范围与实机边界见 [测试说明](docs/testing.md)。
+测试覆盖工具协议、地图依据、确认与取消、寻物观察反馈、迎宾照片确认及安装后的网页资源。另提供 **5 个固定任务契约评估案例**，输出逐项检查与耗时报告；预设回放成绩不代表模型准确率或实机成功率。验证记录与边界见[测试说明](docs/testing.md)。
 
 发布工具依据显式清单生成 `dist/jaka-pi-runtime.tar.gz` 和 SHA256 清单，排除演示视频、测试、日志、会话数据及凭据。
 
@@ -127,4 +140,4 @@ python tools/build_pi_release.py
 
 实机路径依赖 JAKA 底盘、Orbbec 相机、场景地图及本地模型服务。示例地图仅用于展示；在新场地部署前需要重新确认坐标、标定和导航可达性。视觉外观相似不能证明访客身份；当前迎宾流程要求主人查看照片确认。服务尚无公网登录机制，应部署在受信任网络或受控访问入口后。
 
-欢迎通过 Issue 提供复现步骤、日志和预期行为，或通过 PR 改进测试、硬件适配与文档。提交时请排除凭据、个人媒体和现场配置，并运行离线检查。项目级开源许可证尚待确定；第三方图标的许可说明保留在 `src/jaka_agent/web/static/map_icons/FONT-AWESOME-LICENSE.txt`。
+欢迎通过 Issue 提供复现步骤、日志和预期行为，或通过 PR 改进技能、硬件适配、评估与文档，具体入口见[开发指南](CONTRIBUTING.md)。项目级开源许可证尚待确定；第三方图标的许可说明保留在 `src/jaka_agent/web/static/map_icons/FONT-AWESOME-LICENSE.txt`。

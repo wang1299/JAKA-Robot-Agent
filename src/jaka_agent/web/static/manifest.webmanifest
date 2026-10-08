@@ -1,8 +1,8 @@
 {
   "id": "/",
-  "name": "JAKA Vision 移动机器人",
-  "short_name": "JAKA Vision",
-  "description": "JAKA 移动机器人语音与视觉控制终端",
+  "name": "JAKA Robot Agent",
+  "short_name": "JAKA Agent",
+  "description": "多模态 Agent 决策与移动机器人任务执行终端",
   "lang": "zh-CN",
   "start_url": "/",
   "scope": "/",

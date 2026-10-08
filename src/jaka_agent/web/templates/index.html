@@ -27,7 +27,7 @@
   <aside id="sidebar" class="sidebar" aria-label="对话历史">
     <div class="sidebar-brand">
       <div class="brand-mark"><svg><use href="#i-camera"/></svg></div>
-      <div class="brand-name">JAKA Vision</div>
+      <div class="brand-name">JAKA Robot Agent</div>
       <button id="newChatButton" class="icon-button" type="button" aria-label="新建对话" data-tip="新建对话">
         <svg><use href="#i-plus"/></svg>
       </button>
@@ -48,7 +48,7 @@
         <svg><use href="#i-menu"/></svg>
       </button>
       <div id="conversationTitle" class="conversation-title">新对话</div>
-      <div class="topbar-product">移动机器人视觉终端</div>
+      <div class="topbar-product">Agent 决策与机器人任务终端</div>
       <div class="topbar-connection" aria-label="机器人连接状态">
         <span id="mobileConnectionDot" class="status-dot"></span>
         <span id="mobileConnectionText">连接中</span>
@@ -61,11 +61,11 @@
     <section id="messageViewport" class="message-viewport" aria-live="polite">
       <div id="emptyState" class="empty-state">
         <div class="empty-mark"><svg><use href="#i-camera"/></svg></div>
-        <h1>JAKA Vision</h1>
+        <h1>JAKA Robot Agent</h1>
         <div class="prompt-grid">
-          <button type="button" class="prompt-button" data-prompt="描述一下画面里有什么">描述当前画面</button>
-          <button type="button" class="prompt-button" data-prompt="画面里有哪些物体？分别在什么位置？">识别物体和位置</button>
-          <button type="button" class="prompt-button" data-prompt="检查画面中是否存在异常情况">检查现场状态</button>
+          <button type="button" class="prompt-button" data-prompt="你有哪些机器人技能？哪些任务需要我确认后执行？">了解机器人技能</button>
+          <button type="button" class="prompt-button" data-prompt="地图中有哪些可以前往观察的地点？">查询环境与地点</button>
+          <button type="button" class="prompt-button" data-prompt="读取机器人当前状态，汇报最近任务的实际执行结果">查看执行反馈</button>
         </div>
       </div>
       <div id="messageList" class="message-list"></div>

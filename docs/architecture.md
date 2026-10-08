@@ -1,6 +1,8 @@
 # 系统设计
 
-JAKA Robot Agent 将自然语言需求转换为机器人技能计划。模型负责选择工具与参数，任务服务负责验证、确认和执行，导航与视觉模块负责实际动作和现场反馈。
+JAKA Robot Agent 将自然语言需求转换为机器人技能计划。系统围绕两个主体组织：Agent 查询证据、选择工具并生成计划；Robot 执行导航与观察，提供环境反馈。任务服务连接二者，负责验证、确认、取消和状态记录。
+
+[Agent 决策设计](agent.md)解释工具与技能契约，[机器人与具身任务](embodied.md)解释行动与观察，[任务回放](replay.md)提供无硬件可运行入口。
 
 ## 一次任务如何完成
 
@@ -10,6 +12,7 @@ JAKA Robot Agent 将自然语言需求转换为机器人技能计划。模型负
 4. 用户确认对应任务。执行入口核对任务状态、会话和地图版本，过期计划需要重新生成。
 5. 执行器依次导航、拍照与分析，更新进度、轨迹和结果。取消信号传递到运行中的动作与模型请求，防止取消后继续启动后续步骤。
 6. 会话与任务记录写入 SQLite；图片及媒体索引按会话关联，供页面恢复和查看。
+7. 用户请求结果汇报时，Agent 读取执行状态，返回任务完成位置或失败情况。技能内部按观察推进，当前没有模型自主循环重规划。
 
 ## 模块分工
 
@@ -23,6 +26,7 @@ JAKA Robot Agent 将自然语言需求转换为机器人技能计划。模型负
 | `tasks/find_object.py`、`welcome.py`、`patrol.py` | 寻物、迎宾与巡逻业务流程 |
 | `hardware/navigation.py`、`camera.py`、`voice.py` | 底盘协议、相机与语音设备适配 |
 | `models/config.py`、`runtime.py`、`vision.py`、`person_match.py` | 模型路由、调用、视觉与人物外观比对 |
+| `replay/fixtures.py`、`state.py` | 固定任务样例、合成反馈与无硬件回放适配 |
 | `storage/memory.py`、`media.py` | SQLite 会话、消息、摘要和媒体关联 |
 | `mapping/catalog.py`、`manager.py`、`bridge.py` | 地图读取、标定与建图协调 |
 | `web/handler.py`、`state.py`、`app.py` | HTTP 接口、各服务组合与启动 |

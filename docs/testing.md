@@ -13,7 +13,7 @@ python tools/run_offline_checks.py --require-node
 
 也可通过 `--node /path/to/node` 指定 Node.js。未使用 `--require-node` 时，缺少 Node.js 会明确跳过前端检查；CI 要求两部分都通过。日志和 JSON 结果位于 `tests/artifacts/offline-checks/`，不纳入 Git。
 
-当前公开测试集包含 **359 项 Python 测试与 4 组前端检查**：本地 Windows 环境中 355 项 Python 测试通过，3 项服务器协调器集成检查因缺少可选的服务器存档夹具而跳过，1 项 Linux SSH 进程检查因平台不同而跳过；4 组前端检查通过。CI 在 Linux 上运行 SSH 检查，使用假的 SSH 程序，不连接服务器。存档路径为本地 `.codex-tmp/map-update-evidence/`，不纳入公开仓库。
+当前公开测试集包含 **374 项 Python 测试与 4 组前端检查**：本地 Windows 环境中 370 项 Python 测试通过，3 项服务器协调器集成检查因缺少可选的服务器存档夹具而跳过，1 项 Linux SSH 进程检查因平台不同而跳过；4 组前端检查通过。CI 在 Linux 上运行 SSH 检查，使用假的 SSH 程序，不连接服务器。存档路径为本地 `.codex-tmp/map-update-evidence/`，不纳入公开仓库。
 
 入口会去除因跨模块导入造成的重复测试，并在 Python 测试期间阻止非回环网络连接。测试使用模型替身与临时数据。
 
@@ -30,7 +30,7 @@ python tools/run_offline_checks.py --require-node
 
 新增安装与迁移检查覆盖：从其他工作目录启动、新旧入口、网页静态资源、数据目录选择、现场地图和配置优先级。
 
-GitHub Actions 在 Python 3.11 和 3.13 上运行相同入口，构建 wheel 和设备运行包，再使用安装后的包启动 Mock 服务。
+GitHub Actions 在 Python 3.11 和 3.13 上运行相同入口，构建 wheel 和设备运行包，再使用安装后的包启动 Mock 与任务回放服务，核对合成任务卡和随包网页资源。
 
 ```bash
 python -m pip wheel . --no-deps -w dist
@@ -39,6 +39,15 @@ python tools/smoke_web.py --legacy
 # 安装 wheel 到独立环境后，再用该环境验证（不使用源码路径）
 python tools/smoke_web.py --installed --python /path/to/environment/python
 ```
+
+## Agent 与机器人任务契约
+
+```bash
+python tools/evaluate_agent.py --mode replay
+python tools/smoke_web.py --replay
+```
+
+固定案例涵盖寻物观察反馈、迎宾照片确认、导航失败、缺少参考图和运行中取消。本地结果为 5/5；其成绩表示软件契约通过，预设决策和合成反馈不能证明模型或实机能力。`tests/test_agent_robot_replay.py` 另覆盖拒绝照片、过期确认、错误会话、地图更新、异常清理与反馈状态。完整操作和真实决策模式见[任务回放与评估](replay.md)。
 
 ## 手工模型评估
 

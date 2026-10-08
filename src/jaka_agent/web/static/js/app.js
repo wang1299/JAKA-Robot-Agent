@@ -3321,9 +3321,15 @@
       backendOnline = true;
       if (!conversationStoreReady) await initializeConversationStore();
       connectionDot.className = 'status-dot online';
-      connectionText.textContent = health.mock ? '模拟模式' : '树莓派在线';
+      connectionText.textContent = health.replay ? '任务回放' : health.mock ? '模拟模式' : '机器人在线';
       mobileConnectionDot.className = 'status-dot online';
-      mobileConnectionText.textContent = health.mock ? '模拟' : '在线';
+      mobileConnectionText.textContent = health.replay ? '回放' : health.mock ? '模拟' : '在线';
+      if (health.replay && !document.getElementById('replayEntryLink')) {
+        const replayLink = document.createElement('a');
+        replayLink.id = 'replayEntryLink'; replayLink.href = '/replay';
+        replayLink.textContent = '打开 Agent 与机器人任务回放';
+        document.getElementById('emptyState').append(replayLink);
+      }
       if (!sending && speechState === 'idle' && conversationStoreReady) composerStatus.textContent = '就绪';
     } catch (_) {
       backendOnline = false;

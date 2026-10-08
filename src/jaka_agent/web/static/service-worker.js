@@ -1,4 +1,4 @@
-const CACHE_NAME = 'jaka-vision-shell-v17';
+const CACHE_NAME = 'jaka-vision-shell-v18';
 const SHELL_ASSETS = ['/static/css/app.css', '/static/js/app.js', '/', '/manifest.webmanifest', '/pwa-icon.svg'];
 
 self.addEventListener('install', event => {

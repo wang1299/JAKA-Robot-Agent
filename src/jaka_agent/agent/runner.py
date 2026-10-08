@@ -129,7 +129,9 @@ def execution_snapshot(task):
     status = task.get("status")
     labels = {"planned": "计划待确认，尚未启动", "needs_clarification": "目标待澄清，尚未启动",
               "running": "任务执行中", "canceling": "正在停止任务", "canceled": "任务已取消",
-              "succeeded": "任务已完成", "failed": "任务失败", "interrupted": "服务重启，任务未自动恢复，请核实现场状态",
+              "succeeded": "任务已完成", "failed": "任务失败", "aborted": "任务已中止，未完成后续步骤",
+              "error": "任务执行出错", "not_found": "搜索已结束，未找到目标", "inconclusive": "搜索已结束，部分观察无法确认",
+              "interrupted": "服务重启，任务未自动恢复，请核实现场状态",
               "superseded": "旧计划已被本会话的新计划替代"}
     return {"state": status if status in labels else "unknown", "task_id": task.get("id"),
             "label": labels.get(status, "任务状态未知，请查看任务卡"),
@@ -440,8 +442,11 @@ class AgentRunner:
                         unmet = require_current_evidence()
                         if unmet:
                             return unmet
-                        state = execution_snapshot(self.task_snapshot())
-                        return finish(state["label"], response_kind="task_status")
+                        task = self.task_snapshot() or {}
+                        state = execution_snapshot(task)
+                        summary = task.get("result_text") if state["state"] in ("succeeded", "not_found", "inconclusive") else None
+                        text = state["label"] + ("。" + summary[:1200] if isinstance(summary, str) and summary.strip() else "")
+                        return finish(text, response_kind="task_status")
                     unmet = require_current_evidence()
                     if unmet:
                         return unmet
