@@ -22,7 +22,7 @@ def main():
             if not path.is_relative_to(ROOT) or not path.is_file():
                 raise ValueError(f'Invalid release file: {name}')
             data = path.read_bytes()
-            if path.suffix in {'.py', '.html', '.js', '.sh', '.json', '.svg', '.webmanifest', '.txt', '.css', '.toml', '.md'}:
+            if path.suffix in {'.py', '.html', '.js', '.sh', '.json', '.svg', '.webmanifest', '.txt', '.css', '.toml', '.md', '.example'}:
                 data = data.replace(b'\r\n', b'\n')
             info = tarfile.TarInfo(name)
             info.mode = 0o755 if path.suffix == '.sh' else 0o644
