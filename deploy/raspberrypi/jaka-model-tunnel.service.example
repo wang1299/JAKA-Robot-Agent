@@ -1,0 +1,16 @@
+# Adjust User and paths before installing as jaka-model-tunnel.service.
+[Unit]
+Description=SSH tunnel for JAKA model services
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/JAKA-Robot-Agent
+ExecStart=/bin/bash /home/pi/JAKA-Robot-Agent/tunnel.sh foreground
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

@@ -1,130 +1,96 @@
-#!/bin/bash
-# 机器人（上位机）到模型服务器的 SSH 隧道，支持自动重连。
-#
-# 用法：
-#   ./tunnel.sh start
-#   ./tunnel.sh stop
-#   ./tunnel.sh status
-#   ./tunnel.sh restart
-#
-# 前置（只需做一次）：配置免密登录，否则自动重连会卡在密码输入：
-#   ssh-keygen -t ed25519 -N ""                         # 没有密钥时执行
-#   ssh-copy-id -p 5017 root@10.60.45.123               # 把机器人公钥放到服务器
-#   ssh -p 5017 root@10.60.45.123 'echo ok'             # 应直接返回 ok
+#!/usr/bin/env bash
+# Two loopback-only forwards. Host/user/key belong in a private SSH alias.
 set -euo pipefail
-
-REMOTE_USER="root"
-# 校园网直连；Tailscale 不参与模型请求链路。
-REMOTE_HOST="10.60.45.123"
-REMOTE_PORT="5017"
-LOCAL_PORT="8000"
-REMOTE_TARGET="127.0.0.1:8000"
-# 独立的 Agent 决策通道；视觉和旧流程继续使用 8000。
-AGENT_LOCAL_PORT="8001"
-AGENT_REMOTE_TARGET="127.0.0.1:8001"
-IDENTITY_FILE="$HOME/.ssh/id_ed25519"
-
-PID_FILE="$HOME/.minicpm-tunnel.pid"
-LOG_FILE="$HOME/.minicpm-tunnel.log"
-
-SSH_OPTS=(
-  -N
-  -T
-  -L "127.0.0.1:${LOCAL_PORT}:${REMOTE_TARGET}"
-  -L "127.0.0.1:${AGENT_LOCAL_PORT}:${AGENT_REMOTE_TARGET}"
-  -p "${REMOTE_PORT}"
-  -i "${IDENTITY_FILE}"
-  -o IdentitiesOnly=yes
-  -o BatchMode=yes
-  -o ConnectTimeout=10
-  -o ServerAliveInterval=30
-  -o ServerAliveCountMax=3
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+CONFIG="${JAKA_TUNNEL_CONFIG:-$SCRIPT_DIR/configs/tunnel.local.env}"
+if [[ -f "$CONFIG" ]]; then
+  set -a
+  # This is a trusted local shell config, never a downloaded file.
+  source "$CONFIG"
+  set +a
+elif [[ -n "${JAKA_TUNNEL_CONFIG:-}" ]]; then
+  echo "Tunnel config file is missing" >&2
+  exit 1
+fi
+HOST="${JAKA_SSH_HOST:-jaka-model-server}"
+DEST="$HOST"
+[[ -z "${JAKA_SSH_USER:-}" ]] || DEST="${JAKA_SSH_USER}@${HOST}"
+VISION_LOCAL="${JAKA_VISION_LOCAL_PORT:-8000}"
+VISION_REMOTE="${JAKA_VISION_REMOTE_PORT:-8000}"
+AGENT_LOCAL="${JAKA_AGENT_LOCAL_PORT:-8001}"
+AGENT_REMOTE="${JAKA_AGENT_REMOTE_PORT:-8001}"
+for port in "$VISION_LOCAL" "$VISION_REMOTE" "$AGENT_LOCAL" "$AGENT_REMOTE"; do
+  if [[ ! "$port" =~ ^[0-9]{1,5}$ ]] || (( 10#$port < 1 || 10#$port > 65535 )); then
+    echo "Invalid tunnel port" >&2; exit 1
+  fi
+done
+[[ "$VISION_LOCAL" != "$AGENT_LOCAL" ]] || { echo "Local ports must differ" >&2; exit 1; }
+SSH=(ssh -N -T -o BatchMode=yes -o StrictHostKeyChecking=yes
+  -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3
   -o ExitOnForwardFailure=yes
-  -o StrictHostKeyChecking=yes
-)
-
-is_running() {
-  [[ -f "${PID_FILE}" ]] && kill -0 "$(cat "${PID_FILE}")" 2>/dev/null
+  -L "127.0.0.1:${VISION_LOCAL}:127.0.0.1:${VISION_REMOTE}"
+  -L "127.0.0.1:${AGENT_LOCAL}:127.0.0.1:${AGENT_REMOTE}")
+[[ -z "${JAKA_SSH_PORT:-}" ]] || SSH+=(-p "$JAKA_SSH_PORT")
+[[ -z "${JAKA_SSH_IDENTITY:-}" ]] || SSH+=(-i "$JAKA_SSH_IDENTITY")
+SSH+=("$DEST")
+PID_FILE="${JAKA_TUNNEL_PID_FILE:-$HOME/.jaka-model-tunnel.pid}"
+LOG_FILE="${JAKA_TUNNEL_LOG_FILE:-$HOME/.jaka-model-tunnel.log}"
+running() {
+  [[ -f "$PID_FILE" ]] || return 1
+  local pid command
+  read -r pid < "$PID_FILE"
+  [[ "$pid" =~ ^[0-9]+$ && -r "/proc/$pid/cmdline" ]] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  command="$(tr '\0' ' ' < "/proc/$pid/cmdline")"
+  [[ "$command" == *"$SCRIPT_DIR/tunnel.sh __loop__"* ]]
 }
-
-# 内部模式：SSH 断开后等待 3 秒再连接。
-if [[ "${1:-}" == "__loop__" ]]; then
-  while true; do
-    ssh "${SSH_OPTS[@]}" "${REMOTE_USER}@${REMOTE_HOST}" || true
-    echo "[$(date '+%F %T')] SSH 隧道断开，3 秒后重连……" >&2
-    sleep 3
-  done
+action="${1:-status}"
+case "$action" in
+  foreground) exec "${SSH[@]}" ;;
+  __loop__)
+    child=""
+    trap '[[ -z "$child" ]] || kill "$child" 2>/dev/null || true; exit 0' TERM INT
+    while true; do
+      "${SSH[@]}" & child=$!
+      wait "$child" || true
+      child=""
+      sleep 3 & child=$!
+      wait "$child" || true
+      child=""
+    done ;;
+  start|stop|restart|status) ;;
+  *) echo "Usage: $0 {start|stop|restart|status|foreground}" >&2; exit 2 ;;
+esac
+# When the optional unit exists, avoid launching a second background tunnel.
+if command -v systemctl >/dev/null 2>&1 &&
+   systemctl cat jaka-model-tunnel.service >/dev/null 2>&1; then
+  if [[ "$action" == status ]]; then exec systemctl status jaka-model-tunnel.service; fi
+  exec sudo systemctl "$action" jaka-model-tunnel.service
 fi
-
-if [[ "${1:-}" == "foreground" ]]; then
-  exec ssh "${SSH_OPTS[@]}" "${REMOTE_USER}@${REMOTE_HOST}"
-fi
-
-# 已安装 systemd 服务时只使用一个管理者，避免手动 start 再创建抢端口的循环。
-if [[ -f /etc/systemd/system/jaka-model-tunnel.service ]]; then
-  case "${1:-start}" in
-    start|stop|restart)
-      sudo -n systemctl "${1:-start}" jaka-model-tunnel.service
-      echo "模型隧道由 jaka-model-tunnel.service 管理（${1:-start}）"
-      exit 0 ;;
-    status)
-      systemctl --no-pager status jaka-model-tunnel.service
-      exit $? ;;
-  esac
-fi
-
-start() {
-  if is_running; then
-    echo "隧道已在运行（PID $(cat "${PID_FILE}")）"
-    return 0
-  fi
-
-  for port in "$LOCAL_PORT" "$AGENT_LOCAL_PORT"; do
-    if ss -ltn "sport = :$port" | grep -q LISTEN; then
-      echo "本地端口 $port 已占用，不重复启动隧道" >&2
-      return 1
-    fi
-  done
-
-  nohup "$0" __loop__ > "${LOG_FILE}" 2>&1 &
-  echo $! > "${PID_FILE}"
-  sleep 1
-
-  if ! is_running; then
-    echo "隧道启动失败，请查看 ${LOG_FILE}" >&2
-    rm -f "${PID_FILE}"
-    exit 1
-  fi
-
-  echo "隧道已启动（PID $(cat "${PID_FILE}")）"
-  echo "本地服务：http://127.0.0.1:${LOCAL_PORT}"
-  echo "Agent 决策：http://127.0.0.1:${AGENT_LOCAL_PORT}"
-  echo "日志：${LOG_FILE}"
+stop_tunnel() {
+  if running; then
+    local pid; read -r pid < "$PID_FILE"
+    kill "$pid"
+    rm -f -- "$PID_FILE"
+    echo "Tunnel stopped"
+  else echo "Tunnel is not running"; fi
 }
-
-stop() {
-  if [[ -f "${PID_FILE}" ]]; then
-    kill "$(cat "${PID_FILE}")" 2>/dev/null || true
+start_tunnel() {
+  if running; then echo "Tunnel is already running"; return; fi
+  if command -v ss >/dev/null 2>&1; then
+    for port in "$VISION_LOCAL" "$AGENT_LOCAL"; do
+      if [[ -n "$(ss -H -ltn "sport = :$port")" ]]; then
+        echo "A local model port is occupied; check existing services" >&2; exit 1
+      fi
+    done
   fi
-  # 只清理与本脚本转发规则完全匹配的 SSH 子进程。
-  pkill -f "ssh .*-L 127.0.0.1:${LOCAL_PORT}:${REMOTE_TARGET}.*-p ${REMOTE_PORT}" 2>/dev/null || true
-  rm -f "${PID_FILE}"
-  echo "隧道已停止"
+  nohup bash "$SCRIPT_DIR/tunnel.sh" __loop__ >> "$LOG_FILE" 2>&1 &
+  echo "$!" > "$PID_FILE"
+  echo "Tunnel supervisor started; verify model endpoints (see docs/models.md)"
 }
-
-status() {
-  if is_running; then
-    echo "隧道运行中（PID $(cat "${PID_FILE}")）"
-  else
-    echo "隧道未运行"
-    return 1
-  fi
-}
-
-case "${1:-start}" in
-  start) start ;;
-  stop) stop ;;
-  restart) stop; start ;;
-  status) status ;;
-  *) echo "用法：$0 {start|stop|restart|status|foreground}"; exit 1 ;;
+case "$action" in
+  start) start_tunnel ;;
+  stop) stop_tunnel ;;
+  restart) stop_tunnel; start_tunnel ;;
+  status) if running; then echo "Tunnel supervisor is running"; else echo "Tunnel is not running"; exit 1; fi ;;
 esac

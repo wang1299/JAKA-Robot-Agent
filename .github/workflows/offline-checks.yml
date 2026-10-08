@@ -25,6 +25,8 @@ jobs:
           node-version: '22'
       - run: python -m pip install -e ".[dev]" wheel
       - run: python tools/run_offline_checks.py --require-node
+      - run: python tools/check_deployment_privacy.py
+      - run: bash -n tunnel.sh
       - run: python tools/build_pi_release.py
       - run: python -m pip wheel . --no-deps -w dist
       - name: Check installed wheel outside source directory

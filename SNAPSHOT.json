@@ -6,10 +6,16 @@
     "robot_web.py": "1aafdd6e28e30d4117a0eea405614fcdaad5e12c31e6b492803595c778db694e",
     "qwen_planner.py": "4ed63048b123250d3a5776a919ef08007798ca6d372e34cb4eda5b30abcfb73a",
     "pyproject.toml": "e6027f7ad9067b7770bf4813841362ff50506b355337039fe167d70068a2b7e3",
-    "README.md": "adcce73b56f098c99b17a67ac9261a3694ad86cd8cd687b4d6257802609e3171",
+    "README.md": "b52547408926cdc982444492e508a626d6b136ca132c7700550dca858e113528",
     "requirements.txt": "6196c7e8cd2824f11b451ebdb391be69e0fe642af43e5ecbcdbb8f9cca1ca176",
     "configs/model_config.example.json": "07606b6f595874058e23ccb5d5e923323bfe5d02eb6a4e7d072df24a4019c1fc",
-    "tunnel.sh": "e5ea33cab50aa852d6812513542c4a88061f7c48bb68c63d0cf8c74a0c91f6fc",
+    "configs/tunnel.env.example": "68efb4d4f0c83ab2392a8757e71ca9067cffc726a7593cccc0d1d240ca226a26",
+    "deploy/raspberrypi/download_voice_models.py": "11a33578068e45a2029a5424832977f6a8272e2ac188304d3ab2dd93fa1c7fc4",
+    "deploy/raspberrypi/jaka-model-tunnel.service.example": "13b57b8642bcaf3ccbc515838fcfc9386304243973c31373e2fdc2a0135149ba",
+    "docs/models.md": "0c14a838413a7e922976c5977c7812b7fa3955f7c148d5232cc7a29d3c0bc622",
+    "docs/deployment.md": "fbddd61bc728c9b9ab666352d975f26c942923cc0c5653fc5723527bd45b7513",
+    "tools/check_models.py": "bcb89c8f806da5f523065dbac08a1b6d04cf9beebb8fc5cdc5349faa3b432594",
+    "tunnel.sh": "0bd0419388bdd53df7650fd7553a6f487f2f9c0c39dcc3333ba155bfc406a263",
     "src/jaka_agent/__init__.py": "6e5c9dcc1709b67d6cda9f59609decb8f0c51ea154a925a83765ba847ba97b5c",
     "src/jaka_agent/__main__.py": "28dabe5191f110213452e50d938f0bdd65a210e6cd61b22746d80a79868f30db",
     "src/jaka_agent/agent/__init__.py": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
@@ -28,7 +34,7 @@
     "src/jaka_agent/hardware/navigation.py": "c15c7da7f79267a6e87055f4e6485efe48054a28996287da263f43b6cbc47f42",
     "src/jaka_agent/hardware/observation.py": "c94cd1032157e1d515886433e1fa6a23c859328daff11e651a5d40419a2f667c",
     "src/jaka_agent/hardware/service.py": "03385ea17bc9f709b0eef872e9de4083debe9fbb68f5a96f552309a869c51309",
-    "src/jaka_agent/hardware/voice.py": "e4820a436abb531b7f7d41f1e683157e42d41c295e95b3d31da70990bda1b2cc",
+    "src/jaka_agent/hardware/voice.py": "593f4245022e6399467a1a6702751419bf2ce4b48fb3b1f8eba07bfa6f2084be",
     "src/jaka_agent/mapping/__init__.py": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
     "src/jaka_agent/mapping/bridge.py": "1bfbaa8e4074a8b25a198c4b327fc1c023ea430266c049020a31a4bacb35a762",
     "src/jaka_agent/mapping/catalog.py": "989650e9b3876caaafcb4c3862bf399106dff6c03969deeb990612823c839fa6",
@@ -100,13 +106,16 @@
     "src/jaka_agent/web/templates/scene_viewer.html": "be4150b46ad771e7a33f63c34e6cacc03aeb4dd1d2d71c16d19ee7bda3b45a50"
   },
   "validation": {
-    "python_tests": 339,
-    "python_passed": 336,
-    "python_skipped": 3,
+    "python_tests": 359,
+    "python_passed": 355,
+    "python_skipped": 4,
     "frontend_groups_passed": 4,
     "module_and_legacy_http_smoke": "Passed outside checkout",
     "installed_wheel_http_smoke": "Passed in isolated environment outside checkout",
     "runtime_archive": "Hashes, extracted startup and wheel build passed",
-    "hardware_acceptance": "Not rerun; demos are earlier recordings"
+    "hardware_acceptance": "Not rerun; demos are earlier recordings",
+    "python_platform": "Windows; three optional archived fixtures and one Linux tunnel process check skipped",
+    "deployment_privacy": "Current deployment files and known server addresses checked; Git history audited separately",
+    "model_gpu_acceptance": "Not rerun; deployment commands and mock HTTP contracts checked offline"
   }
 }

@@ -4,7 +4,7 @@
 
 适合研究和开发服务机器人应用：把“去某个地点”“找照片里的物品”“接到访客并带到指定位置”等需求，连接到可观察、可取消的实际任务。没有硬件也可以启动网页体验界面，并运行离线测试。
 
-[演示视频](docs/demos.md) · [快速开始](#快速开始) · [系统设计](docs/architecture.md) · [实机部署](docs/deployment.md) · [硬件准备](docs/hardware.md) · [测试说明](docs/testing.md)
+[演示视频](docs/demos.md) · [快速开始](#快速开始) · [系统设计](docs/architecture.md) · [模型部署](docs/models.md) · [实机部署](docs/deployment.md) · [硬件准备](docs/hardware.md) · [测试说明](docs/testing.md)
 
 ## 演示
 
@@ -69,7 +69,7 @@ jaka-agent --mock --host 127.0.0.1 --port 8080
 
 也可使用 `python -m jaka_agent --mock`；原来的 `python robot_web.py --mock` 启动方式仍可用。
 
-要使用真实 Agent，需要配置兼容的模型服务。包内 `src/jaka_agent/resources/model_config.json` 保留当前开发环境的双模型配置：Qwen3.5 9B 负责 Agent 决策，MiniCPM V 4.6 负责视觉分析与部分任务规划。端口和模型名称需要匹配实际服务；参考 [部署说明](docs/deployment.md) 和 `configs/model_config.example.json`。
+要使用真实 Agent，需要配置双模型服务：Qwen3.5 9B 负责 Agent 决策，MiniCPM V 4.6 负责视觉分析与部分任务规划，当前均使用 Transformers Serve。仓库提供 GPU 环境安装、权重下载、启动、SSH 隧道和合成输入验收代码，完整步骤见[模型部署](docs/models.md)。语音模型与外部在线建图模型按需部署。端口和模型名称需要匹配实际服务；实际服务器连接信息只保存在被 Git 忽略的本地配置中。
 
 ## 系统结构
 
@@ -103,7 +103,7 @@ JAKA-Robot-Agent/
 ├── examples/           # 场景图、标定示例
 ├── tests/              # Python 与前端回归、手工评估
 ├── tools/              # 地图维护、检查和打包工具
-├── deploy/             # 设备运行清单与建图服务适配
+├── deploy/             # GPU 模型部署、语音模型下载、设备运行清单与建图适配
 ├── docs/               # 部署、设计、测试与四段演示
 ├── pyproject.toml      # 安装、依赖与命令入口
 └── robot_web.py         # 原启动命令的兼容入口
@@ -119,7 +119,7 @@ python tools/run_offline_checks.py --require-node
 python tools/build_pi_release.py
 ```
 
-离线检查包含 **339 项 Python 测试和 4 组前端检查**：当前公开环境中 336 项 Python 测试通过，3 项依赖服务器存档夹具的检查跳过，4 组前端检查通过。不调用模型、不驱动机器人；检查范围与实机边界见 [测试说明](docs/testing.md)。
+离线检查包含 **359 项 Python 测试和 4 组前端检查**：本地 Windows 环境中 355 项 Python 测试通过，3 项服务器存档夹具检查和 1 项 Linux 隧道进程检查跳过，4 组前端检查通过。CI 在 Linux 上运行隧道检查。不调用真实模型、不驱动机器人；检查范围与实机边界见 [测试说明](docs/testing.md)。
 
 发布工具依据显式清单生成 `dist/jaka-pi-runtime.tar.gz` 和 SHA256 清单，排除演示视频、测试、日志、会话数据及凭据。
 

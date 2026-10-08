@@ -2,7 +2,7 @@
 """语音助手模块: 唤醒词 + STT 下指令 + TTS 播报。
 
 把树莓派上跑通的 voice_test.py 抽成可复用的 VoiceAssistant,供 qwen_planner 的
-`voice` 子命令调用。硬件/模型均按树莓派实测钉死:
+`voice` 子命令调用。硬件自动探测，模型目录可通过环境变量覆盖:
   - 麦阵: 启动时按名 AIUI 自动探测 PortAudio 索引 (8ch → 降混单声道 16k)
   - 喇叭: 启动时按名自动探测, aplay -D plughw:CARD=<id> (plughw 自动重采样; 用卡名寻址抗重编号)
   - STT : 流式 Paraformer 中英 int8  (/home/pi/voice/asr-paraformer)
@@ -29,10 +29,10 @@ import numpy as np
 import sounddevice as sd
 import sherpa_onnx
 
-# ---------- 硬编码(树莓派实测) ----------
-BASE = "/home/pi/voice"
-ASR_DIR = os.path.join(BASE, "asr-paraformer")
-TTS_DIR = os.path.join(BASE, "vits-piper-zh_CN-huayan-medium")
+# ---------- 语音路径与设备默认值 ----------
+BASE = os.path.expanduser(os.environ.get("JAKA_VOICE_BASE", "/home/pi/voice"))
+ASR_DIR = os.path.expanduser(os.environ.get("JAKA_ASR_DIR", os.path.join(BASE, "asr-paraformer")))
+TTS_DIR = os.path.expanduser(os.environ.get("JAKA_TTS_DIR", os.path.join(BASE, "vits-piper-zh_CN-huayan-medium")))
 MIC_DEV = None            # 启动时自动探测 AIUI 麦阵(见 _detect_mic_pa); 卡号/索引随热插拔会变
 SPEAKER_ALSA = None       # 启动时自动探测喇叭(见 _detect_speaker_alsa); 用 CARD=<名字> 抗重编号
 SPEAKER_VOLUME_PCT = 80   # 启动时把喇叭【系统音量】设到此 %(0~100)

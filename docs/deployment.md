@@ -14,7 +14,7 @@ Web 和规划命令按以下顺序选择配置：显式 `JAKA_MODEL_CONFIG` → 
 | `QWEN_PLAN_MODEL` / `QWEN_VISION_MODEL` | 任务规划与视觉分析使用的服务端模型名称 |
 | `JAKA_AGENT_API_KEY` / `DASHSCOPE_API_KEY` | 对应服务的凭据；本地无鉴权服务可使用占位值 |
 
-`configs/model_config.example.json` 是字段示例。实际服务提供的模型名未必是本地权重目录，请按部署端返回的名称设置。仓库不包含模型权重或推理服务器安装程序。
+完整的模型下载、推理环境安装、启动、SSH 转发和接口验收见[模型部署](models.md)。`deploy/server/model_deploy.py` 提供当前双模型的安装与启动代码，权重另行下载。`configs/model_config.example.json` 是字段示例；请按自己的服务配置模型名称，或使用部署脚本生成与权重路径一致的配置。
 
 Linux 示例，先复制示例为自己的配置并填入实际模型名：
 
@@ -56,12 +56,12 @@ PowerShell 使用 `$env:JAKA_MODEL_CONFIG = '配置文件的绝对路径'` 等�
 
 ## 语音与手机访问
 
-`src/jaka_agent/hardware/voice.py` 需要 `numpy`、`sounddevice`、`sherpa_onnx` 及系统音频组件。当前模型目录固定为：
+`src/jaka_agent/hardware/voice.py` 需要 `numpy`、`sounddevice`、`sherpa_onnx` 及系统音频组件。未设置环境变量时沿用旧设备目录：
 
 - `/home/pi/voice/asr-paraformer`：Paraformer 中英识别模型。
 - `/home/pi/voice/vits-piper-zh_CN-huayan-medium`：Piper 中文语音合成模型。
 
-语音依赖可安装 `.[audio]`，并自行准备对应模型；若修改目录，调整 `src/jaka_agent/hardware/voice.py` 的 `BASE`。手机录音还需要 FFmpeg，将上传音频转为 16 kHz 单声道 PCM；单次最多 30 秒、8 MB。浏览器录音需要 HTTPS 或本机 localhost，远程访问可使用受控 HTTPS 代理或安全隧道。
+语音依赖可安装 `.[audio]`；用 `JAKA_VOICE_BASE` 或分别用 `JAKA_ASR_DIR`、`JAKA_TTS_DIR` 覆盖目录。模型下载与文件检查见[可选语音模型](models.md#6-可选语音模型)。手机录音还需要 FFmpeg，将上传音频转为 16 kHz 单声道 PCM；单次最多 30 秒、8 MB。浏览器录音需要 HTTPS 或本机 localhost，远程访问可使用受控 HTTPS 代理或安全隧道。
 
 服务没有公网登录机制。建议监听 `127.0.0.1` 并置于受控访问入口后，或限制在受信任网络内。
 

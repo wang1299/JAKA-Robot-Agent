@@ -60,3 +60,12 @@ build/
 *.egg-info/
 outputs/
 configs/*.local.json
+configs/*.local.env
+
+# Download weights separately; never commit them or host credentials.
+models/
+model_weights/
+*.safetensors
+*.onnx
+*.pth
+*.pt

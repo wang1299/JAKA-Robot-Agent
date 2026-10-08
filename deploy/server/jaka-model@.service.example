@@ -1,0 +1,17 @@
+# Edit User, WorkingDirectory and ExecStart before installing as jaka-model@.service.
+[Unit]
+Description=JAKA model service (%i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=jaka
+WorkingDirectory=/opt/JAKA-Robot-Agent
+ExecStart=/usr/bin/python3 /opt/JAKA-Robot-Agent/deploy/server/model_deploy.py serve --role %i --config /etc/jaka/server.local.env
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target
