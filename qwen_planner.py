@@ -70,7 +70,7 @@ NAV_FACE_MAX_DELTA_DEG = min(
     35.0, max(0.0, float(os.getenv("JAKA_NAV_FACE_MAX_DELTA_DEG", "35"))),
 )
 NAV_GOAL_THETA_TOLERANCE_DEG = min(
-    10.0, max(1.0, float(os.getenv("JAKA_NAV_GOAL_THETA_TOLERANCE_DEG", "3"))),
+    10.0, max(1.0, float(os.getenv("JAKA_NAV_GOAL_THETA_TOLERANCE_DEG", "10"))),
 )
 # 优先选择位于机器人和物体之间的可达点，使“驶向可达点”的方向与“到点后
 # 面向物体”的方向接近。超过该夹角时继续搜索其他候选，避免到点后掉头。
@@ -1171,6 +1171,9 @@ class PlanExecutor:
                 results.append((target_distance, robot_distance, target_x, target_y, source,
                                 candidate_x, candidate_y, heading_delta))
             except Exception as exc:
+                from robot_runtime import TaskCancelled
+                if isinstance(exc, TaskCancelled):
+                    raise
                 errors.append(f"{source}({candidate_x:.2f},{candidate_y:.2f}): {exc}")
         return min(
             results,
@@ -1189,7 +1192,10 @@ class PlanExecutor:
         viewpoint = obj.get("viewpoint") or {}
         try:
             robot_pose = tuple(map(float, self.driver.get_pose()))
-        except Exception:
+        except Exception as exc:
+            from robot_runtime import TaskCancelled
+            if isinstance(exc, TaskCancelled):
+                raise
             robot_pose = tuple(map(float, self.start_pose))
         errors = []
 
@@ -1299,7 +1305,7 @@ class PlanExecutor:
             center_x, center_y = float(center[0]), float(center[1])
         except (TypeError, ValueError, IndexError) as exc:
             raise RuntimeError(f"{_zh(obj)}缺少可用于朝向对正的中心坐标") from exc
-        tolerance = math.radians(3)
+        tolerance = math.radians(NAV_GOAL_THETA_TOLERANCE_DEG)
         max_step = math.radians(NAV_FACE_MAX_DELTA_DEG)
         camera_closed = False
         total_adjusted = 0.0
@@ -1384,7 +1390,7 @@ class PlanExecutor:
 
         detail = (
             f"已累计补偿{math.degrees(total_adjusted):+.1f}°，"
-            "但仍未达到3°朝向误差要求"
+            f"但仍未达到{NAV_GOAL_THETA_TOLERANCE_DEG:g}°朝向误差要求"
         )
         self.log.append(ExecLog(
             "orient", obj.get("ann_id"), detail, status="failed",
@@ -1430,7 +1436,8 @@ class PlanExecutor:
                 on_translation_arrived = s.get("_on_translation_arrived")
                 if callable(on_translation_arrived):
                     on_translation_arrived()
-                announce(f"已到达 {_zh(o)}")
+                if s.get("_announce_arrival", True):
+                    announce(f"已到达 {_zh(o)}")
             return st
 
         target = None
@@ -1468,7 +1475,7 @@ class PlanExecutor:
             if callable(on_translation_arrived):
                 on_translation_arrived()
             st = self._face_object_center(o)
-            if st == "succeeded":
+            if st == "succeeded" and s.get("_announce_arrival", True):
                 announce(f"已到达 {_zh(o)} 并正对目标")
         return st
 
@@ -1523,7 +1530,8 @@ class PlanExecutor:
             self.log.append(ExecLog(
                 "observe", o["ann_id"], f"问: {q}", observation=ans, status=status,
             ))
-            announce(f"看到：{(ans or '').split('  (')[0].strip() or ans}")
+            if s.get("_announce_observation", True) or status != "succeeded":
+                announce(f"看到：{(ans or '').split('  (')[0].strip() or ans}")
             return status
         finally:
             if hasattr(self.driver, "close_camera"):

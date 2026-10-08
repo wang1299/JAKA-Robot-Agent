@@ -9,19 +9,19 @@
 #
 # 前置（只需做一次）：配置免密登录，否则自动重连会卡在密码输入：
 #   ssh-keygen -t ed25519 -N ""                         # 没有密钥时执行
-#   ssh-copy-id root@100.125.32.77                      # 把机器人公钥放到服务器
-#   ssh root@100.125.32.77 'echo ok'                     # 应直接返回 ok
+#   ssh-copy-id -p 5017 root@10.60.45.123               # 把机器人公钥放到服务器
+#   ssh -p 5017 root@10.60.45.123 'echo ok'             # 应直接返回 ok
 set -euo pipefail
 
 REMOTE_USER="root"
-# 两台设备属于同一 Tailnet；使用服务器固定 Tailscale IP，避免 DNS 配置变化影响启动。
-REMOTE_HOST="100.125.32.77"
-REMOTE_PORT="22"
+# 校园网直连；Tailscale 不参与模型请求链路。
+REMOTE_HOST="10.60.45.123"
+REMOTE_PORT="5017"
 LOCAL_PORT="8000"
-REMOTE_TARGET="localhost:8000"
+REMOTE_TARGET="127.0.0.1:8000"
 # 独立的 Agent 决策通道；视觉和旧流程继续使用 8000。
 AGENT_LOCAL_PORT="8001"
-AGENT_REMOTE_TARGET="localhost:8001"
+AGENT_REMOTE_TARGET="127.0.0.1:8001"
 IDENTITY_FILE="$HOME/.ssh/id_ed25519"
 
 PID_FILE="$HOME/.minicpm-tunnel.pid"
@@ -40,7 +40,7 @@ SSH_OPTS=(
   -o ServerAliveInterval=30
   -o ServerAliveCountMax=3
   -o ExitOnForwardFailure=yes
-  -o StrictHostKeyChecking=accept-new
+  -o StrictHostKeyChecking=yes
 )
 
 is_running() {
@@ -60,11 +60,31 @@ if [[ "${1:-}" == "foreground" ]]; then
   exec ssh "${SSH_OPTS[@]}" "${REMOTE_USER}@${REMOTE_HOST}"
 fi
 
+# 已安装 systemd 服务时只使用一个管理者，避免手动 start 再创建抢端口的循环。
+if [[ -f /etc/systemd/system/jaka-model-tunnel.service ]]; then
+  case "${1:-start}" in
+    start|stop|restart)
+      sudo -n systemctl "${1:-start}" jaka-model-tunnel.service
+      echo "模型隧道由 jaka-model-tunnel.service 管理（${1:-start}）"
+      exit 0 ;;
+    status)
+      systemctl --no-pager status jaka-model-tunnel.service
+      exit $? ;;
+  esac
+fi
+
 start() {
   if is_running; then
     echo "隧道已在运行（PID $(cat "${PID_FILE}")）"
     return 0
   fi
+
+  for port in "$LOCAL_PORT" "$AGENT_LOCAL_PORT"; do
+    if ss -ltn "sport = :$port" | grep -q LISTEN; then
+      echo "本地端口 $port 已占用，不重复启动隧道" >&2
+      return 1
+    fi
+  done
 
   nohup "$0" __loop__ > "${LOG_FILE}" 2>&1 &
   echo $! > "${PID_FILE}"

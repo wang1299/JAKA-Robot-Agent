@@ -1,0 +1,11 @@
+{
+  "files": [
+    "robot_web.py", "robot_web_page.html", "robot_web_routing.py", "robot_agent.py", "robot_agent_map.py", "robot_skills.py",
+    "voice.py", "qwen_planner.py", "robot_client.py", "example_capture_infer.py",
+    "robot_model_config.py", "model_config.json", "robot_runtime.py", "robot_memory.py", "robot_media.py",
+    "auto_explore.py", "mapping_bridge.py", "jaka_step.py",
+    "scene_viewer.html", "service-worker.js", "manifest.webmanifest", "pwa-icon.svg",
+    "tunnel.sh", "slam.png", "zmq_scene_graph.json"
+  ],
+  "icon_directory": "map_icons"
+}

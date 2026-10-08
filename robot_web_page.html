@@ -192,6 +192,24 @@
         <div id="objectInspector" class="object-inspector empty">
           <div class="object-inspector-title">选择地图中的物体</div>
           <div id="objectInspectorMeta" class="object-inspector-meta"></div>
+          <div id="patrolSetup" hidden>
+            <strong id="patrolSelectionCount">巡逻选点：0 个</strong>
+            <div>点击图标选中，再次点击取消；按选择顺序巡逻（2～30 个地点）。</div>
+            <div id="patrolSelectedList" class="patrol-selected-list"></div>
+            <label>巡逻轮数
+              <select id="patrolRounds">
+                <option value="-1">持续巡逻，发现异常停止</option>
+                <option value="1">首轮采集 + 1 轮检查</option>
+                <option value="2">首轮采集 + 2 轮检查</option>
+                <option value="3">首轮采集 + 3 轮检查</option>
+              </select>
+            </label>
+            <div class="patrol-selection-actions">
+              <button id="clearPatrolSelection" type="button" class="command-button">清空</button>
+              <button id="planSelectedPatrol" type="button" class="command-button primary">生成巡逻计划</button>
+            </div>
+            <div id="patrolSelectionHint" role="status"></div>
+          </div>
           <div class="object-actions">
             <button id="goObjectButton" class="command-button" type="button">前往</button>
             <button id="observeObjectButton" class="command-button primary" type="button">前往并观察</button>
@@ -470,7 +488,7 @@ button { color: inherit; }
 .task-status.running { background: #e8f3fb; color: #17658c; }
 .task-status.succeeded { background: var(--accent-soft); color: var(--accent-strong); }
 .task-status.anomaly { background: #fff1d8; color: #9a5a00; }
-.task-status.error, .task-status.aborted, .task-status.canceled, .task-status.not_found { background: #fdeceb; color: var(--danger); }
+.task-status.error, .task-status.aborted, .task-status.canceled, .task-status.not_found, .task-status.inconclusive { background: #fdeceb; color: var(--danger); }
 .task-understanding { padding: 10px 12px 2px; color: var(--muted); }
 .semantic-reasoning { margin: 8px 12px 4px; padding: 9px 10px; border-left: 3px solid var(--accent); background: var(--accent-soft); color: var(--text); font-size: 12px; }
 .candidate-status-list { display: flex; flex-wrap: wrap; gap: 6px; padding: 7px 12px 10px; }
@@ -634,6 +652,12 @@ body.resizing-map { cursor: col-resize; user-select: none; }
 .object-halo { fill: var(--object-color); fill-opacity: .92; stroke: rgba(255,255,255,.94); stroke-width: 2.2; opacity: .94; pointer-events: none; vector-effect: non-scaling-stroke; filter: drop-shadow(0 2px 3px rgba(31,35,38,.20)); }
 .object-icon { pointer-events: none; filter: brightness(0) invert(1); opacity: .96; }
 .map-object.selected .object-halo { stroke: #202326; stroke-width: 3; opacity: 1; }
+.map-object.patrol-selected .object-halo { stroke: #147f78 !important; stroke-width: 5 !important; opacity: 1; }
+#patrolSetup { margin-top: 8px; font-size: 12px; line-height: 1.6; }
+#patrolSetup[hidden] { display: none; }
+.patrol-selected-list { display: flex; gap: 5px; flex-wrap: wrap; max-height: 84px; overflow-y: auto; margin: 6px 0; }
+.patrol-selected-list button { min-height: 30px; font-size: 11px; }
+.patrol-selection-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 7px; }
 .map-object.target .object-halo { stroke: var(--warning); stroke-width: 3; opacity: 1; }
 .map-object.active-target .object-halo { stroke: var(--danger); stroke-width: 3.5; opacity: 1; }
 .map-object.query-target .object-halo { stroke: var(--accent); stroke-width: 3; stroke-dasharray: 5 3; opacity: 1; }
@@ -680,6 +704,7 @@ body.resizing-map { cursor: col-resize; user-select: none; }
 .object-inspector-title { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .object-inspector-meta { min-height: 17px; margin-top: 3px; color: var(--muted); font-size: 11px; }
 .object-actions { display: flex; gap: 7px; margin-top: 9px; }
+.object-actions[hidden] { display: none; }
 .object-actions .command-button { flex: 1; }
 
 /* 默认使用当前拟物体地图和 SLAM 底图，把低频设置从工作界面收起。 */
@@ -904,6 +929,14 @@ body.resizing-map { cursor: col-resize; user-select: none; }
   const composerStatus = document.getElementById('composerStatus');
   const capabilitySelect = document.getElementById('capabilitySelect');
   const capabilityHint = document.getElementById('capabilityHint');
+  const patrolSetup = document.getElementById('patrolSetup');
+  const patrolSelectedList = document.getElementById('patrolSelectedList');
+  const patrolSelectionCount = document.getElementById('patrolSelectionCount');
+  const patrolSelectionHint = document.getElementById('patrolSelectionHint');
+  const patrolRounds = document.getElementById('patrolRounds');
+  const planSelectedPatrol = document.getElementById('planSelectedPatrol');
+  let patrolSelectedIds = [];
+  let patrolMapSnapshot = null;
   const sidebar = document.getElementById('sidebar');
   const backdrop = document.getElementById('sidebarBackdrop');
   const imageDialog = document.getElementById('imageDialog');
@@ -975,6 +1008,10 @@ body.resizing-map { cursor: col-resize; user-select: none; }
   const mappingApplyButton = document.getElementById('mappingApplyButton');
 
   let conversations = loadConversations();
+  let conversationStoreReady = false;
+  let conversationStoreLoading = false;
+  let pendingTurn = null;
+  const composerDrafts = new Map();
   let workspaceMode = localStorage.getItem('jaka-vision-workspace') === 'mapping' ? 'mapping' : 'function';
   let activeId = localStorage.getItem(STORAGE_KEY + '-active');
   let sending = false;
@@ -1023,7 +1060,7 @@ body.resizing-map { cursor: col-resize; user-select: none; }
     map_query: { prompt: '整张拟物体地图中有没有[物体]？分别在哪里？', hint: '查询 JSON 中的全部已知物体，不拍照' },
     navigate: { prompt: '前往[目标物体]附近', hint: '规划并执行到指定地图物体的导航' },
     navigate_observe: { prompt: '前往[目标物体]附近进行环境观察并汇报现场情况', hint: '导航到目标、拍照并分析现场' },
-    patrol: { prompt: '在[地点A]、[地点B]和[地点C]之间持续巡逻，发现环境变化立即停止并汇报', hint: '至少两个地图点；首轮建基线，之后逐点比较前后照片' },
+    patrol: { prompt: '', hint: '在地图上点击需要巡逻的物体图标，再点击“生成巡逻计划”' },
     find_object: { prompt: '根据参考图片寻找这件物品', hint: '还需要点击图片按钮上传参考图' },
     welcome: { prompt: '帮我去接人点那边接一下人，如果没找到，就在那里一直等。等到看到他的时候带他回来。', hint: '上传人物上半身照片，并在地图中选择接人点和返回点' },
     return: { prompt: '前往[目标物体]附近观察，然后返回出发点', hint: '在同一个任务中完成目标操作后返回起点' },
@@ -1080,6 +1117,111 @@ body.resizing-map { cursor: col-resize; user-select: none; }
     return conversations.find(item => item.id === activeId) || null;
   }
 
+  async function loadServerConversation(id) {
+    const result = await api(`/api/conversation?id=${encodeURIComponent(id)}`);
+    const index = conversations.findIndex(item => item.id === id);
+    if (pendingTurn?.conversationId === id && index >= 0) {
+      // Switching away/back during upload must not erase an unsent in-flight draft.
+      const ids = new Set([pendingTurn.userId, pendingTurn.assistantId]);
+      for (const draft of conversations[index].messages.filter(m => ids.has(m.id))) {
+        const savedIndex = result.conversation.messages.findIndex(m => m.id === draft.id);
+        if (savedIndex < 0) result.conversation.messages.push(draft);
+        else if (result.conversation.messages[savedIndex].state === 'processing') result.conversation.messages[savedIndex] = draft;
+      }
+    }
+    if (index >= 0) conversations[index] = result.conversation;
+    else conversations.unshift(result.conversation);
+    if (activeId === id) {
+      activeTask = [...result.conversation.messages].reverse().find(item => item.task)?.task || null;
+      renderAll();
+    }
+    saveConversations();
+    return result.conversation;
+  }
+
+  async function initializeConversationStore() {
+    if (conversationStoreReady || conversationStoreLoading) return;
+    conversationStoreLoading = true;
+    try {
+      const migrationKey = STORAGE_KEY + '-server-import-v1';
+      if (!localStorage.getItem(migrationKey)) {
+        // Retain the original cache as a recoverable migration backup.
+        if (!localStorage.getItem(STORAGE_KEY + '-before-server-import')) {
+          localStorage.setItem(STORAGE_KEY + '-before-server-import', localStorage.getItem(STORAGE_KEY) || '[]');
+        }
+        for (const legacy of conversations) await api('/api/conversation/import', legacy);
+        localStorage.setItem(migrationKey, 'done');
+      }
+      const result = await api('/api/conversations');
+      conversations = result.conversations.map(item => ({ ...item, messages: [] }));
+      if (!conversations.some(item => item.id === activeId)) activeId = conversations[0]?.id || null;
+      if (!activeId) {
+        const created = await api('/api/conversation/create', { id: uid(), title: '新对话' });
+        conversations.unshift(created.conversation);
+        activeId = created.conversation.id;
+      }
+      await loadServerConversation(activeId);
+      conversationStoreReady = true;
+    } catch (error) {
+      composerStatus.textContent = '会话同步失败，旧记录仍保留在本机：' + error.message;
+    } finally {
+      conversationStoreLoading = false;
+      refreshActionAvailability();
+    }
+  }
+
+  async function refreshServerConversations() {
+    if (!conversationStoreReady || sending || conversationStoreLoading || speechState !== 'idle') return;
+    conversationStoreLoading = true;
+    try {
+      const result = await api('/api/conversations');
+      conversations = result.conversations.map(item => ({ ...item,
+        messages: conversations.find(c => c.id === item.id)?.messages || [] }));
+      if (!conversations.some(c => c.id === activeId)) activateConversation(conversations[0]?.id || null);
+      if (activeId) await loadServerConversation(activeId);
+      else await newConversation();
+      renderHistory();
+    } catch (_) { /* A temporary outage must not clear cached records. */ }
+    finally { conversationStoreLoading = false; }
+  }
+  window.addEventListener('focus', refreshServerConversations);
+
+  function activateConversation(id) {
+    if (id === activeId) return;
+    if (activeId) composerDrafts.set(activeId, { text: input.value, reference: pendingReference,
+      capability: capabilitySelect.value, pickup: welcomePickupAnnId, dropoff: welcomeReturnAnnId,
+      patrolIds: [...patrolSelectedIds], patrolSnapshot: patrolMapSnapshot, patrolRounds: patrolRounds.value });
+    pendingReference = null; // The previous draft owns its object URL until restored/deleted.
+    clearPendingReference();
+    activeId = id;
+    activeTask = null;
+    mapQueryIds = new Set();
+    const draft = composerDrafts.get(id) || {};
+    input.value = draft.text || '';
+    pendingReference = draft.reference || null;
+    if (pendingReference) {
+      referencePreviewImage.src = pendingReference.previewUrl;
+      referencePreviewName.textContent = pendingReference.name;
+      referencePreview.hidden = false;
+    }
+    capabilitySelect.value = draft.capability || '';
+    welcomePickupAnnId = draft.pickup ?? null;
+    welcomeReturnAnnId = draft.dropoff ?? null;
+    welcomeSelectionRole = null;
+    patrolSelectedIds = [...(draft.patrolIds || [])];
+    patrolMapSnapshot = draft.patrolSnapshot || null;
+    patrolRounds.value = draft.patrolRounds || '-1';
+    refreshPatrolSetup();
+    refreshWelcomeSetup();
+    autoResize();
+  }
+
+  function canSwitchConversation() {
+    if (speechState === 'idle') return true;
+    composerStatus.textContent = '请先结束或取消语音输入，再切换会话';
+    return false;
+  }
+
   function ensureConversation() {
     let conversation = currentConversation();
     if (!conversation) {
@@ -1091,20 +1233,31 @@ body.resizing-map { cursor: col-resize; user-select: none; }
     return conversation;
   }
 
-  function newConversation() {
+  async function newConversation() {
+    if (!conversationStoreReady || !canSwitchConversation()) return;
     const conversation = { id: uid(), title: '新对话', createdAt: Date.now(), messages: [] };
+    try { await api('/api/conversation/create', { id: conversation.id, title: conversation.title }); }
+    catch (error) { composerStatus.textContent = error.message; return; }
     conversations.unshift(conversation);
-    activeId = conversation.id;
+    activateConversation(conversation.id);
+    activeTask = null;
     saveConversations();
     renderAll();
     input.focus();
     closeSidebar();
   }
 
-  function deleteConversation(id) {
+  async function deleteConversation(id) {
+    if (!conversationStoreReady || !canSwitchConversation()) return;
+    try { await api('/api/conversation/delete', { id }); }
+    catch (error) { composerStatus.textContent = error.message; return; }
     conversations = conversations.filter(item => item.id !== id);
-    if (activeId === id) activeId = conversations[0]?.id || null;
-    if (!activeId) ensureConversation();
+    if (activeId === id) activateConversation(conversations[0]?.id || null);
+    const draft = composerDrafts.get(id);
+    if (draft?.reference?.previewUrl) URL.revokeObjectURL(draft.reference.previewUrl);
+    composerDrafts.delete(id);
+    if (!activeId) await newConversation();
+    else await loadServerConversation(activeId);
     saveConversations();
     renderAll();
   }
@@ -1122,11 +1275,15 @@ body.resizing-map { cursor: col-resize; user-select: none; }
       select.type = 'button';
       select.className = 'history-select';
       select.textContent = conversation.title || '新对话';
-      select.addEventListener('click', () => {
-        activeId = conversation.id;
+      select.addEventListener('click', async () => {
+        if (!conversationStoreReady || !canSwitchConversation()) return;
+        activateConversation(conversation.id);
+        activeTask = null;
         saveConversations();
         renderAll();
         closeSidebar();
+        try { await loadServerConversation(conversation.id); }
+        catch (error) { composerStatus.textContent = error.message; }
       });
       const remove = document.createElement('button');
       remove.type = 'button';
@@ -1397,11 +1554,13 @@ body.resizing-map { cursor: col-resize; user-select: none; }
   }
 
   function taskStatusText(status) {
+    if (status === 'interrupted') return '已中断，需重新规划';
+    if (status === 'superseded') return '已被新计划替代';
     return ({
       needs_clarification: '需要选择',
       planned: '等待确认', running: '执行中', canceling: '正在停止',
-      succeeded: '已完成', anomaly: '发现异常', not_found: '未找到', canceled: '已取消', aborted: '已中止', error: '执行失败',
-      pending: '等待中', baseline: '已建基线', normal: '无异常', active: '检查中', miss: '已排除', match: '已找到'
+      succeeded: '已完成', anomaly: '发现异常', not_found: '未确认找到', inconclusive: '部分点无法确认', canceled: '已取消', aborted: '已中止', error: '执行失败',
+      pending: '等待中', baseline: '已建基线', normal: '无异常', active: '检查中', uncertain: '无法确认', miss: '已排除', match: '已找到'
     })[status] || status || '未知';
   }
 
@@ -1552,9 +1711,9 @@ body.resizing-map { cursor: col-resize; user-select: none; }
         href: `/map-icons/${objectSymbolKind(object || {})}.svg`, x: x - 9, y: y - 9,
         width: 18, height: 18, preserveAspectRatio: 'xMidYMid meet', class: 'find-route-icon',
       }));
-      if (value === 'match' || value === 'miss') {
+      if (value === 'match' || value === 'miss' || value === 'uncertain') {
         const verdict = svgNode('text', { x: x + 13, y: y - 12, class: 'find-route-verdict' });
-        verdict.textContent = value === 'match' ? '✓' : '×';
+        verdict.textContent = value === 'match' ? '✓' : value === 'uncertain' ? '?' : '×';
         group.append(verdict);
       }
       const title = svgNode('title');
@@ -1616,6 +1775,42 @@ body.resizing-map { cursor: col-resize; user-select: none; }
       welcomeState.className = 'semantic-reasoning';
       welcomeState.textContent = task.result_text || task.current_stage;
       tool.append(welcomeState);
+      const pending = task.guest_confirmation;
+      if (task.status === 'running' && !task.cancel_requested && pending?.status === 'pending') {
+        const panel = document.createElement('div');
+        panel.className = 'task-understanding';
+        const photo = document.createElement('img');
+        photo.src = pending.image_url;
+        photo.alt = '等待主人确认的现场客人照片';
+        photo.style.cssText = 'display:block;width:100%;max-width:560px;border-radius:8px';
+        photo.addEventListener('click', () => openImage(pending.image_url));
+        const note = document.createElement('p');
+        note.textContent = `请确认照片中是否为目标客人。确认后机器人将前往${task.return_name || '送客点'}；未确认不会返程。`;
+        const actions = document.createElement('div');
+        actions.className = 'task-actions';
+        const reject = document.createElement('button');
+        reject.type = 'button';
+        reject.className = 'command-button';
+        reject.textContent = '不是目标，继续等待';
+        const accept = document.createElement('button');
+        accept.type = 'button';
+        accept.className = 'command-button primary';
+        accept.textContent = '确认客人，前往送客点';
+        accept.disabled = true;
+        reject.disabled = !navigator.onLine;
+        // Never offer a motion confirmation before its evidence has loaded.
+        photo.addEventListener('load', () => { accept.disabled = !navigator.onLine || Boolean(executionBlocker(robotData)); });
+        photo.addEventListener('error', () => { accept.disabled = true; note.textContent = '现场照片加载失败，请恢复连接或刷新后再确认。'; });
+        const decide = async accepted => {
+          accept.disabled = reject.disabled = true;
+          await confirmWelcomeGuest(task, pending.id, accepted);
+        };
+        accept.addEventListener('click', () => decide(true));
+        reject.addEventListener('click', () => decide(false));
+        actions.append(reject, accept);
+        panel.append(photo, note, actions);
+        tool.append(panel);
+      }
     }
     if (task.kind === 'find_object') {
       renderFindRoutePreview(tool, task);
@@ -1630,7 +1825,7 @@ body.resizing-map { cursor: col-resize; user-select: none; }
           image.alt = value.stage || '寻物搜索画面';
           image.addEventListener('click', () => openImage(value.image_url));
           const caption = document.createElement('figcaption');
-          caption.textContent = `${value.verdict === 'match' ? '✓' : '×'} ${value.stage || '搜索视角'}`;
+          caption.textContent = `${value.verdict === 'match' ? '✓' : value.verdict === 'uncertain' ? '? 识别无效，未确认' : '×'} ${value.stage || '搜索视角'}`;
           figure.append(image, caption);
           attempts.append(figure);
         }
@@ -1737,6 +1932,9 @@ body.resizing-map { cursor: col-resize; user-select: none; }
       const observations = document.createElement('div');
       observations.className = 'task-observations';
       for (const value of task.observations) {
+        if (task.kind === 'welcome' && task.status === 'running' && !task.cancel_requested
+            && task.guest_confirmation?.status === 'pending'
+            && value.image_url === task.guest_confirmation.image_url) continue;
         const block = document.createElement('div');
         block.className = 'task-observation';
         if (value.image_url) {
@@ -1962,6 +2160,8 @@ body.resizing-map { cursor: col-resize; user-select: none; }
           summary.textContent = `本轮使用了 ${message.toolTrace.length} 次工具`;
           details.append(summary);
           const names = { get_skill_context: '核对任务资料和默认点位', observe_scene: '查看现场', inspect_previous_scene: '查看历史照片', inspect_reference: '查看上传图片', query_map: '查询地图', compare_map_positions: '核对空间关系', list_map_categories: '查看地图类别', ask_user: '澄清需求', query_project_info: '查询项目资料', get_robot_status: '查询状态', propose_task: '生成待确认计划', plan_patrol: '视觉巡逻技能', plan_welcome: '迎宾接待技能', plan_find_object: '参考图寻物技能', plan_inspect_location: '到点查看技能' };
+          names.recall_conversation = '查阅本会话记忆';
+          names.inspect_memory_image = '分析历史任务照片';
           names.plan_navigate = '地点导航规划';
           for (const step of message.toolTrace) {
             const row = document.createElement('div');
@@ -2702,8 +2902,72 @@ body.resizing-map { cursor: col-resize; user-select: none; }
     renderMap();
   }
 
+  function refreshPatrolSetup() {
+    const enabled = capabilitySelect.value === 'patrol';
+    patrolSetup.hidden = !enabled;
+    if (patrolSelectedIds.length && patrolMapSnapshot !== mapData?.snapshot) {
+      patrolSelectedIds = [];
+      patrolMapSnapshot = null;
+    }
+    patrolSelectedList.replaceChildren();
+    patrolSelectionCount.textContent = `巡逻选点：${patrolSelectedIds.length} 个`;
+    for (const [index, id] of patrolSelectedIds.entries()) {
+      const object = mapData?.objects?.find(item => item.ann_id === id);
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'command-button';
+      button.textContent = `${index + 1}. ${object?.category_zh || object?.category || id} ×`;
+      button.addEventListener('click', () => {
+        if (sending) return;
+        patrolSelectedIds = patrolSelectedIds.filter(value => value !== id);
+        refreshPatrolSetup(); renderMap();
+      });
+      patrolSelectedList.append(button);
+    }
+    planSelectedPatrol.disabled = sending || speechState !== 'idle' || !conversationStoreReady || !backendOnline || patrolSelectedIds.length < 2;
+    patrolSelectionHint.textContent = patrolSelectedIds.length < 2
+      ? '至少选择两个地点；不会自动开始移动。' : '仅使用已选地点；生成任务卡后还需确认执行。';
+    objectInspector.querySelector('.object-actions').hidden = enabled;
+  }
+
+  function togglePatrolPoint(object) {
+    if (sending) return;
+    refreshPatrolSetup();
+    const xy = object.nav_xy || object.floor_xy;
+    if (!Number.isInteger(object.ann_id) || (object.lifecycle || 'active') !== 'active' || !Array.isArray(xy)
+        || xy.length < 2 || !xy.slice(0, 2).every(Number.isFinite) || !mapData?.snapshot) {
+      patrolSelectionHint.textContent = '该图标没有可用导航点，不能加入巡逻。';
+      return;
+    }
+    const index = patrolSelectedIds.indexOf(object.ann_id);
+    if (index >= 0) patrolSelectedIds.splice(index, 1);
+    else if (patrolSelectedIds.length < 30) patrolSelectedIds.push(object.ann_id);
+    else { patrolSelectionHint.textContent = '一次最多选择 30 个地点。'; return; }
+    patrolMapSnapshot = mapData.snapshot;
+    refreshPatrolSetup();
+  }
+
+  function selectedPatrolRequest() {
+    if (patrolSelectedIds.length < 2) throw new Error('请至少选择两个巡逻地点');
+    if (!patrolMapSnapshot || patrolMapSnapshot !== mapData?.snapshot) throw new Error('地图已变化，请重新选点');
+    const ids = [...patrolSelectedIds];
+    const rounds = Number(patrolRounds.value);
+    const names = ids.map(id => {
+      const object = mapData.objects.find(item => item.ann_id === id);
+      if (!object) throw new Error('所选点位已失效，请刷新地图重新选择');
+      return `${object.category_zh || object.category}（#${id}）`;
+    });
+    return {target_ann_ids: ids, rounds, map_snapshot: patrolMapSnapshot,
+      instruction: `按地图选择顺序巡逻：${names.join(' → ')}；首轮采集基线，${rounds < 0 ? '之后持续检查' : `之后检查 ${rounds} 轮`}，发现异常停止并汇报。`};
+  }
+
   function handleMapObjectSelection(object) {
     selectedObjectId = object.ann_id;
+    if (capabilitySelect.value === 'patrol') {
+      togglePatrolPoint(object);
+      renderMap(); renderObjectInspector();
+      return;
+    }
     if (capabilitySelect.value === 'welcome' && welcomeSelectionRole) {
       if (welcomeSelectionRole === 'pickup') {
         welcomePickupAnnId = object.ann_id;
@@ -2810,6 +3074,7 @@ body.resizing-map { cursor: col-resize; user-select: none; }
   }
 
   function renderObjectInspector() {
+    refreshPatrolSetup();
     const object = selectedMapObject();
     const title = objectInspector.querySelector('.object-inspector-title');
     if (!object) {
@@ -2878,6 +3143,15 @@ body.resizing-map { cursor: col-resize; user-select: none; }
     }
   }
 
+  function standaloneDoorways(data) {
+    const objects = data?.objects || [];
+    const ids = new Set(objects.map(object => String(object.ann_id)));
+    return (data?.doorways || []).filter(portal =>
+      Array.isArray(portal.floor_xy) && portal.floor_xy.length >= 2 &&
+      portal.floor_xy.slice(0, 2).every(value => typeof value === 'number' && Number.isFinite(value)) &&
+      ![portal.navigation_ann_id, portal.anchor_ann_id, ...(portal.member_ids || [])].some(id => id != null && ids.has(String(id))));
+  }
+
   function renderMap() {
     mapSvg.replaceChildren();
     if (!mapData?.objects?.length) return;
@@ -2885,6 +3159,7 @@ body.resizing-map { cursor: col-resize; user-select: none; }
     const width = 1000;
     const height = 720;
     const points = mapData.objects.map(object => object.nav_xy || object.floor_xy);
+    points.push(...standaloneDoorways(mapData).map(portal => portal.floor_xy));
     for (const track of savedTracks) {
       if (!visibleTrackIds.has(String(track.id))) continue;
       for (const point of track.points || []) {
@@ -3013,6 +3288,7 @@ body.resizing-map { cursor: col-resize; user-select: none; }
       const kind = objectSymbolKind(object);
       const classes = ['map-object'];
       if (String(object.ann_id) === String(selectedObjectId)) classes.push('selected');
+      if (capabilitySelect.value === 'patrol' && patrolSelectedIds.includes(object.ann_id)) classes.push('patrol-selected');
       if (String(object.ann_id) === String(welcomePickupAnnId)) classes.push('welcome-pickup');
       if (String(object.ann_id) === String(welcomeReturnAnnId)) classes.push('welcome-return');
       if (taskTargets.has(String(object.ann_id))) classes.push('target');
@@ -3044,6 +3320,7 @@ body.resizing-map { cursor: col-resize; user-select: none; }
       let verdictSymbol = '';
       let verdictClass = '';
       if (findVerdict === 'miss') { verdictSymbol = '×'; verdictClass = 'miss'; }
+      if (findVerdict === 'uncertain') { verdictSymbol = '?'; verdictClass = 'uncertain'; }
       if (findVerdict === 'match') { verdictSymbol = '✓'; verdictClass = 'match'; }
       if (patrolVerdict === 'normal') { verdictSymbol = '✓'; verdictClass = 'normal'; }
       if (patrolVerdict === 'anomaly') { verdictSymbol = '!'; verdictClass = 'anomaly'; }
@@ -3070,6 +3347,21 @@ body.resizing-map { cursor: col-resize; user-select: none; }
       objectLayer.append(group);
     }
     sceneLayer.append(objectLayer);
+
+    // Unanchored visual doorways retain their portal IDs. They are display
+    // evidence, not invented ann_ids or verified robot navigation targets.
+    for (const portal of standaloneDoorways(mapData)) {
+      const [cx, cy] = project(...portal.floor_xy);
+      const group = svgNode('g', { class: 'map-portal', 'data-portal-id': portal.portal_id,
+        transform: `rotate(${-mapRotation} ${cx} ${cy})`, role: 'img',
+        'aria-label': `${portal.category_zh}（门洞记录，通行未验证）` });
+      group.append(svgNode('circle', { cx, cy, r: 24, fill: '#8374cb', stroke: '#fff', 'stroke-width': 3 }));
+      appendObjectIcon(group, 'door', cx, cy, 36);
+      const title = svgNode('title');
+      title.textContent = `${portal.category_zh} · ${portal.portal_id} · 仅显示已保存门洞，通行与导航点未验证`;
+      group.append(title);
+      sceneLayer.append(group);
+    }
 
     if (robotData?.pose) {
       const [rx, ry] = project(robotData.pose.x, robotData.pose.y);
@@ -3254,11 +3546,12 @@ body.resizing-map { cursor: col-resize; user-select: none; }
   }
 
   function syncTask(task) {
-    activeTask = task;
+    if (!task || !task.conversation_id || task.conversation_id === activeId) activeTask = task;
     if (!task) return false;
     let changed = false;
     for (const conversation of conversations) {
       for (const message of conversation.messages) {
+        if (task.conversation_id && task.conversation_id !== conversation.id) continue;
         if (message.taskId === task.id) {
           const before = JSON.stringify(message.task || {});
           message.task = task;
@@ -3276,11 +3569,12 @@ body.resizing-map { cursor: col-resize; user-select: none; }
   async function pollRobotStatus() {
     let delay = 2600;
     try {
-      const status = await api('/api/robot/status');
+      const polledConversation = activeId;
+      const status = await api(`/api/robot/status?conversation_id=${encodeURIComponent(polledConversation || '')}`);
       const previousBlocker = executionBlocker(robotData);
       robotData = status.robot;
       const safetyChanged = previousBlocker !== executionBlocker(robotData);
-      const changed = syncTask(status.task);
+      const changed = activeId === polledConversation ? syncTask(status.task) : false;
       const dot = document.createElement('span');
       dot.className = 'status-dot ' + (robotData?.online ? 'online' : 'offline');
       const label = document.createElement('span');
@@ -3315,7 +3609,7 @@ body.resizing-map { cursor: col-resize; user-select: none; }
 
   async function executeTask(taskId) {
     try {
-      const result = await api('/api/task/execute', { task_id: taskId });
+      const result = await api('/api/task/execute', { task_id: taskId, conversation_id: activeId });
       syncTask(result.task);
       renderMessages();
       renderMap();
@@ -3324,9 +3618,25 @@ body.resizing-map { cursor: col-resize; user-select: none; }
     }
   }
 
+  async function confirmWelcomeGuest(task, confirmationId, accepted) {
+    const conversationId = task.conversation_id || activeId;
+    try {
+      const result = await api('/api/task/welcome-confirm', {
+        task_id: task.id, conversation_id: conversationId,
+        confirmation_id: confirmationId, accepted,
+      });
+      syncTask(result.task);
+      renderMessages();
+      renderMap();
+    } catch (error) {
+      composerStatus.textContent = error.message;
+      renderMessages();
+    }
+  }
+
   async function cancelTask(taskId) {
     try {
-      const result = await api('/api/task/cancel', { task_id: taskId });
+      const result = await api('/api/task/cancel', { task_id: taskId, conversation_id: activeId });
       syncTask(result.task);
       renderMessages();
       renderMap();
@@ -3465,9 +3775,10 @@ body.resizing-map { cursor: col-resize; user-select: none; }
   }
 
   function refreshActionAvailability() {
+    refreshPatrolSetup();
     const speechCanToggle = speechState === 'idle' || speechState === 'recording';
-    sendButton.disabled = sending || !backendOnline || speechState !== 'idle';
-    micButton.disabled = sending || !backendOnline || !speechCanToggle;
+    sendButton.disabled = sending || !backendOnline || !conversationStoreReady || speechState !== 'idle';
+    micButton.disabled = sending || !backendOnline || !conversationStoreReady || !speechCanToggle;
   }
 
   function setSpeechState(nextState, statusText = '') {
@@ -3527,8 +3838,13 @@ body.resizing-map { cursor: col-resize; user-select: none; }
   }
 
   async function sendMessage(forcedText = '', targetSelection = null) {
-    const question = (forcedText || input.value).trim();
-    if (!question || sending) return;
+    let patrolRequest = null;
+    if (capabilitySelect.value === 'patrol') {
+      try { patrolRequest = selectedPatrolRequest(); }
+      catch (error) { composerStatus.textContent = patrolSelectionHint.textContent = error.message; openMapPanel(); return; }
+    }
+    const question = patrolRequest ? patrolRequest.instruction : (forcedText || input.value).trim();
+    if (!question || sending || !conversationStoreReady) return;
     if (!backendOnline) {
       composerStatus.textContent = '机器人连接不可用，请稍后重试';
       return;
@@ -3555,7 +3871,8 @@ body.resizing-map { cursor: col-resize; user-select: none; }
     const conversationId = conversation.id;
     const assistantId = uid();
     const userId = uid();
-    const selectedReference = pendingReference;
+    pendingTurn = { conversationId, userId, assistantId };
+    const selectedReference = patrolRequest ? null : pendingReference;
     const recentHistory = conversation.messages
       .filter(message => message.text && message.state !== 'error')
       .slice(-16)
@@ -3584,7 +3901,7 @@ body.resizing-map { cursor: col-resize; user-select: none; }
     try {
       const uploadPromise = selectedReference
         ? selectedReference.optimizedPromise.then(file => api(
-          `/api/reference/upload?name=${encodeURIComponent(file.name)}`,
+          `/api/reference/upload?name=${encodeURIComponent(file.name)}&conversation_id=${encodeURIComponent(conversationId)}&turn_id=${encodeURIComponent(userId)}`,
           file
         ))
         : Promise.resolve(null);
@@ -3596,6 +3913,19 @@ body.resizing-map { cursor: col-resize; user-select: none; }
       }
       const assistant = locate();
       if (!assistant) return;
+      if (patrolRequest) {
+        const planned = await api('/api/task/patrol/plan', {
+          ...patrolRequest, conversation_id: conversationId,
+          user_message_id: userId, assistant_message_id: assistantId,
+        });
+        assistant.taskId = planned.task.id;
+        assistant.task = planned.task;
+        assistant.text = '巡逻计划已生成，请核对地点及顺序后点击开始执行。';
+        assistant.state = 'done';
+        if (activeId === conversationId) { activeTask = planned.task; closeMapPanel(); }
+        renderMap();
+        return;
+      }
       if (welcomeRequest) {
         openMapPanel();
         if (!reference) throw new Error('请先上传目标人物的参考照片');
@@ -3607,6 +3937,7 @@ body.resizing-map { cursor: col-resize; user-select: none; }
         saveConversations();
         if (activeId === conversationId) renderMessages();
         const planned = await api('/api/task/welcome/plan', {
+          conversation_id: conversationId, user_message_id: userId, assistant_message_id: assistantId,
           instruction: question,
           reference,
           pickup_ann_id: selectedWelcomePickup,
@@ -3616,13 +3947,14 @@ body.resizing-map { cursor: col-resize; user-select: none; }
         assistant.task = planned.task;
         assistant.text = planned.task.understanding || '';
         assistant.state = 'done';
-        activeTask = planned.task;
+        if (activeId === conversationId) activeTask = planned.task;
         renderMap();
         return;
       }
       assistant.state = 'thinking';
       assistant.agentProgress = '小卡正在思考';
       const result = await agentChat({ question, history: recentHistory, reference, conversation_id: conversationId,
+        user_message_id: userId, assistant_message_id: assistantId,
         ...(targetSelection ? { target_selection: targetSelection } : {}) }, event => {
         if (event.text) {
           assistant.agentProgress = event.text;
@@ -3645,13 +3977,15 @@ body.resizing-map { cursor: col-resize; user-select: none; }
       assistant.image = result.image_url || assistant.image;
       assistant.captureId = result.capture_id || assistant.captureId;
       assistant.imageSource = result.image_source || assistant.imageSource;
-      mapQueryIds = new Set((result.target_ids || []).map(String));
+      if (activeId === conversationId) mapQueryIds = new Set((result.target_ids || []).map(String));
       if (result.task) {
         assistant.taskId = result.task.id;
         assistant.task = result.task;
-        activeTask = result.task;
-        mapQueryIds = new Set((result.task.clarification?.candidate_ann_ids || []).map(String));
-        openMapPanel();
+        if (activeId === conversationId) {
+          activeTask = result.task;
+          mapQueryIds = new Set((result.task.clarification?.candidate_ann_ids || []).map(String));
+          openMapPanel();
+        }
       }
       assistant.state = 'done';
       renderMap();
@@ -3663,16 +3997,20 @@ body.resizing-map { cursor: col-resize; user-select: none; }
       }
     } finally {
       sending = false;
+      pendingTurn = null;
       refreshActionAvailability();
-      capabilitySelect.value = '';
+      if (activeId === conversationId) capabilitySelect.value = '';
       capabilityHint.textContent = '选择后会再次填入可修改的示例指令';
       welcomeSelectionRole = null;
       refreshWelcomeSetup();
       referenceButton.setAttribute('aria-label', '上传寻物参考图');
+      refreshPatrolSetup();
       referenceButton.dataset.tip = '上传寻物参考图';
       composerStatus.textContent = backendOnline ? '就绪' : '机器人连接不可用';
       saveConversations();
       if (activeId === conversationId) renderMessages();
+      // Backend owns the final record, including tasks completed after a tab switch.
+      try { await loadServerConversation(conversationId); } catch (_) { /* local draft remains recoverable */ }
       input.focus();
     }
   }
@@ -3835,6 +4173,15 @@ body.resizing-map { cursor: col-resize; user-select: none; }
     if (welcomeEnabled && welcomePickupAnnId == null) welcomeSelectionRole = 'pickup';
     if (!welcomeEnabled) welcomeSelectionRole = null;
     refreshWelcomeSetup();
+    refreshPatrolSetup();
+    renderMap();
+    if (capabilitySelect.value === 'patrol') {
+      input.value = '';
+      capabilityHint.textContent = example.hint;
+      openMapPanel();
+      autoResize();
+      return;
+    }
     if (!example) {
       capabilityHint.textContent = '选择后会填入可修改的示例指令';
       return;
@@ -3870,11 +4217,12 @@ body.resizing-map { cursor: col-resize; user-select: none; }
     try {
       const health = await api('/api/health');
       backendOnline = true;
+      if (!conversationStoreReady) await initializeConversationStore();
       connectionDot.className = 'status-dot online';
       connectionText.textContent = health.mock ? '模拟模式' : '树莓派在线';
       mobileConnectionDot.className = 'status-dot online';
       mobileConnectionText.textContent = health.mock ? '模拟' : '在线';
-      if (!sending && speechState === 'idle') composerStatus.textContent = '就绪';
+      if (!sending && speechState === 'idle' && conversationStoreReady) composerStatus.textContent = '就绪';
     } catch (_) {
       backendOnline = false;
       connectionDot.className = 'status-dot offline';
@@ -3982,6 +4330,12 @@ body.resizing-map { cursor: col-resize; user-select: none; }
     trackPanelToggleButton.setAttribute('aria-label', open ? '隐藏轨迹记录' : '显示轨迹记录');
   });
   capabilitySelect.addEventListener('change', applyCapabilityExample);
+  planSelectedPatrol.addEventListener('click', () => sendMessage());
+  document.getElementById('clearPatrolSelection').addEventListener('click', () => {
+    if (sending) return;
+    patrolSelectedIds = []; patrolMapSnapshot = null;
+    refreshPatrolSetup(); renderMap();
+  });
   backdrop.addEventListener('click', closeSidebar);
   document.getElementById('closeImageButton').addEventListener('click', () => imageDialog.close());
   imageDialog.addEventListener('click', event => { if (event.target === imageDialog) imageDialog.close(); });

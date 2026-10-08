@@ -1,0 +1,8 @@
+{
+  "JAKA_AGENT_PROTOCOL": "json",
+  "JAKA_AGENT_BASE_URL": "http://127.0.0.1:8001/v1",
+  "JAKA_AGENT_MODEL": "your-agent-model",
+  "DASHSCOPE_BASE_URL": "http://127.0.0.1:8000/v1",
+  "QWEN_PLAN_MODEL": "your-vision-model",
+  "QWEN_VISION_MODEL": "your-vision-model"
+}

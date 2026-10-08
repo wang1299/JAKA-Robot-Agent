@@ -1,0 +1,4 @@
+# Camera, voice and mapping dependencies are optional; see docs/deployment.md.
+openai==2.53.0
+Pillow==11.1.0
+requests==2.32.3

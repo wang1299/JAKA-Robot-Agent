@@ -1,4 +1,4 @@
-const CACHE_NAME = 'jaka-vision-shell-v9-structured-navigation';
+const CACHE_NAME = 'jaka-vision-shell-v16-find-portals';
 const SHELL_ASSETS = ['/', '/manifest.webmanifest', '/pwa-icon.svg'];
 
 self.addEventListener('install', event => {
@@ -18,6 +18,7 @@ function isLiveRobotResource(url) {
   return url.pathname.startsWith('/api/')
     || url.pathname.startsWith('/captures/')
     || url.pathname.startsWith('/references/')
+    || url.pathname.startsWith('/videos/')
     || url.pathname.startsWith('/mapping/')
     || url.pathname.startsWith('/slam-map/');
 }

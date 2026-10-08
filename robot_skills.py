@@ -33,7 +33,7 @@ class Skill:
 
 INSTRUCTION = {"type": "string", "description": "结合上下文还原的完整需求，不添加用户未授权的行动"}
 POINT = {"type": "integer", "minimum": 0, "maximum": 2147483647,
-         "description": "从地图查询结果中确定的真实 ann_id，不可编造；目标有歧义时先询问"}
+         "description": "必须先从地图工具结果读取目标的ann_id。房号、room_id、门牌数字不是ann_id，不得直接填入；目标有歧义时先询问"}
 
 SKILLS = {skill.id: skill for skill in (
     Skill("navigate", "地点导航", "按顺序到达指定地图地点；回到某个地点也是地点导航，不等于到达后再返回出发点。", {
@@ -53,12 +53,12 @@ SKILLS = {skill.id: skill for skill in (
         ("逐点导航并建立照片基线", "按指定轮数比较同点前后照片", "发现可信变化时停止并汇报"),
         "有限轮次结束，或检测到变化后停下并汇报；持续巡逻没有自动完成时刻。",
         "导航、目标观察或比较失败时停止并报告；不自行扩展巡逻区域。"),
-    Skill("welcome", "迎宾接待", "用户要求接送人物时：去接人点等待参考照片中的人物，经外观比对和语音确认后引导到返回点。只去名为接客点或送客点的地点不属于迎宾，应选地点导航。", {
+    Skill("welcome", "迎宾接待", "用户要求接送人物时：去接人点等待参考照片中的人物，经外观比对后展示现场照片，主人在网页点击确认后引导到送客点。只去名为接客点或送客点的地点不属于迎宾，应选地点导航。", {
         "instruction": INSTRUCTION, "pickup_ann_id": POINT, "return_ann_id": POINT},
-        ("前往接人点", "等待并比对参考照片中的人物", "语音确认；否认继续等，未听清再询问", "引导到返回点"),
-        "人物经语音确认且返回点导航成功；外观相似不能单独证明身份。",
+        ("前往接人点", "等待并比对参考照片中的人物", "展示现场照片等待主人网页确认；拒绝后继续等待", "确认后引导到送客点"),
+        "主人通过网页确认现场照片且送客点导航成功；外观相似不能单独证明身份，不通过语音自动确认。",
         "两点必须不同且有坐标；缺人物图先请求上传；导航失败停止，检测失败可重试，用户随时可停止等待。", True),
-    Skill("find_object", "参考图寻物", "根据参考图片，在现有寻物执行器选出的地图候选点逐点寻找并比对。", {
+    Skill("find_object", "参考图寻物", "用户要求寻找上传照片中的物品时，根据参考图片，在寻物执行器选出的地图候选点逐点寻找并比对。未知物品位置正是搜索的原因；无需先在地图中匹配该物品，也不要求用户提供物品名称、房间或位置线索。位置线索可选，不是启动规划的前提。仅分析图片、不要求寻找时不要选此技能。", {
         "instruction": INSTRUCTION},
         ("检查参考图片并生成候选路线", "逐点导航和视觉比对", "找到后报告位置，或报告未找到"),
         "达到现有比对标准后报告位置，或候选点检查完毕报告未找到；地图记录不等于实时发现。",
@@ -109,6 +109,8 @@ def skill_resources(skill_id, graph, reference_available=False, reference_source
     return {"ok": True, "skill_id": skill_id, "map_name": graph.get("name"),
             "requires_confirmation": True, "requires_reference": skill.requires_reference,
             "reference": {"available": bool(reference_available), "source": reference_source},
+            "accepted_inputs": list(skill.parameters) + (["reference"] if skill.requires_reference else []),
+            "purpose": skill.purpose,
             "default_candidates": candidates,
             "default_arguments": {name: rows[0]["ann_id"] for name, rows in candidates.items() if len(rows) == 1},
             "ambiguous_parameters": [name for name, rows in candidates.items() if len(rows) > 1],

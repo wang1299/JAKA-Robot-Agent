@@ -102,6 +102,9 @@ MAX_AUDIO_SECONDS = 30
 TASK_VIDEO_ENABLED = os.getenv("JAKA_RECORD_TASK_VIDEO", "1").strip().lower() not in {"0", "false", "no", "off"}
 TASK_VIDEO_FPS = max(0.5, min(15.0, float(os.getenv("JAKA_TASK_VIDEO_FPS", "5"))))
 TASK_VIDEO_MAX_WIDTH = max(320, int(os.getenv("JAKA_TASK_VIDEO_MAX_WIDTH", "960")))
+# 巡逻复访必须复现首轮拍照位姿；超差则停止比较，不把视角差异报为环境异常。
+PATROL_POSE_DISTANCE_TOLERANCE_M = 0.08
+PATROL_POSE_THETA_TOLERANCE_RAD = math.radians(3)
 FIND_SNAPSHOT_INTERVAL_SECONDS = max(0.5, float(os.getenv("JAKA_FIND_SNAPSHOT_INTERVAL_SECONDS", "1")))
 FIND_SNAPSHOT_ATTEMPTS_PER_POINT = max(1, int(os.getenv("JAKA_FIND_SNAPSHOT_ATTEMPTS_PER_POINT", "2")))
 FIND_SNAPSHOT_MAX_ERRORS = max(1, int(os.getenv("JAKA_FIND_SNAPSHOT_MAX_ERRORS", "3")))
@@ -125,6 +128,8 @@ WELCOME_PERSON_USER = (
 WELCOME_PERSON_JSON_SYSTEM = (
     "你是人物图像比对结果格式化器。把上一阶段的观察摘要转换成唯一一个合法JSON对象。"
     "只能使用摘要中明确写出的可见证据，不得补充、猜测或改变结论。"
+    "JSON 示例中的‘参考图衣着’‘现场衣着’‘候选位置或无’等只是占位符，绝不能原样输出；"
+    "无法从摘要确定的字段写‘无法核对’，相应比较写 unknown。"
     "match表示两边可见细节一致，mismatch表示有明确冲突，unknown表示任一边无法核对。"
     "只输出JSON，不要分析、Markdown、代码块、前后缀或多个JSON。"
 )
@@ -139,6 +144,24 @@ WELCOME_PERSON_JSON_SCHEMA = (
     '"reference_body_shape":"参考图体型",'
     '"candidate_body_shape":"现场体型","body_shape":"match|mismatch|unknown",'
     '"contradictions":["明确冲突，没有则为空数组"],"reason":"简短依据"}'
+)
+WELCOME_PRESENCE_PROMPT = (
+    "只查看这一张现场照片，不要考虑参考图或之前的对话。画面里是否存在真实的人？"
+    "海报、标识、反光和人形图案都不是人。看不清时按无人处理。"
+    '仅返回 JSON：{"person_visible":false,"person_count":0,'
+    '"visible_evidence":"实际可见的人体部位和衣着；无人则为空"}'
+)
+WELCOME_RETRY_PROMPT = (
+    "图1是目标人物参考照，图2是现场照片。只根据这两张图里的真实可见细节比对人物。"
+    "先分别观察两图，不根据地点猜测身份。返回一个JSON对象，包含以下字段："
+    "candidate_visible（布尔）、candidate_region（图2人物的具体位置）、"
+    "reference_upper_clothing、candidate_upper_clothing、upper_clothing、"
+    "reference_face_hair、candidate_face_hair、face_hair、"
+    "reference_accessories、candidate_accessories、accessories、"
+    "reference_body_shape、candidate_body_shape、body_shape、"
+    "contradictions（字符串数组）、reason。四个对比字段只能填match、mismatch或unknown。"
+    "描述字段必须写各图实际看到的颜色、款式或部位，绝不能写字段名、模板占位词或泛称；"
+    "看不清写‘无法核对’并将比较设为unknown。不确定时不要猜测。仅输出JSON。"
 )
 WELCOME_AFFIRMATIVE_WORDS = (
     "是的", "是", "对的", "对", "没错", "我是", "我就是", "就是", "嗯",
@@ -182,6 +205,12 @@ CATEGORY_ZH_MAP = {
     "elevator display": "电梯显示屏",
     "plant": "植物",
     "sofa": "沙发",
+    "table": "桌子",
+    "whiteboard": "白板",
+    "cabinet": "柜子",
+    "case": "箱子",
+    "shelf": "置物架",
+    "platform trolley": "平台推车",
 }
 MAP_ICON_NAMES = {
     "chair", "plant", "shrub", "case", "table", "coffeetable", "desk", "cabinet",
@@ -306,7 +335,7 @@ def _vision_completion(client, **kwargs):
         LOGGER.warning("[vision] structured request returned HTTP 500; retrying without response_format")
         return client.chat.completions.create(**kwargs)
 
-def _clean_old_captures(max_age_days=14):
+def _clean_old_captures(max_age_days=14, pinned=()):
     """启动时清理过旧图片(best-effort), 避免树莓派磁盘无限增长。"""
     if not CAPTURE_DIR.exists():
         return
@@ -315,7 +344,7 @@ def _clean_old_captures(max_age_days=14):
     for pattern in patterns:
         for path in CAPTURE_DIR.glob(pattern):
             try:
-                if path.stat().st_mtime < cutoff:
+                if not {f"/captures/{path.name}", f"/references/{path.name}"}.intersection(pinned) and path.stat().st_mtime < cutoff:
                     path.unlink()
             except OSError:
                 pass
@@ -417,6 +446,7 @@ def _normalize_graph(data: dict, name="scene_graph.json") -> dict:
         obj["category"] = obj.get("category") or "Unknown"
         category_key = re.sub(r"\s+", " ", str(obj["category"]).strip().lower())
         obj["category_zh"] = obj.get("category_zh") or CATEGORY_ZH_MAP.get(category_key, obj["category"])
+        obj["category_label_zh"] = CATEGORY_ZH_MAP.get(category_key, obj["category"])
         obj["func_desc"] = obj.get("func_desc") or ""
         obj["position"] = obj.get("position") or f"世界系({x:.1f},{y:.1f})"
         obj["floor_xy"] = [x, y]
@@ -434,10 +464,46 @@ def _normalize_graph(data: dict, name="scene_graph.json") -> dict:
         normalized.append(obj)
     if not normalized:
         raise ValueError(f"{name} 中没有带 floor_xy/center_world 的有效物体")
+    portals = []
+    raw_portals = data.get('doorways') or {}
+    for portal in (raw_portals.values() if isinstance(raw_portals, dict) else raw_portals):
+        if not isinstance(portal, dict) or portal.get('lifecycle') == 'deleted':
+            continue
+        center = portal.get('floor_xy') or (portal.get('geometry') or {}).get('center_world')
+        if not isinstance(center, list) or len(center) < 2 or any(type(v) not in (int,float) or not math.isfinite(v) for v in center[:2]):
+            continue
+        if not isinstance(portal.get('portal_id'), str):
+            continue
+        nav_id = portal.get('navigation_ann_id')
+        navigation_enabled = (portal.get('navigation_mode') == 'approach' and type(nav_id) is int and nav_id >= 0)
+        if navigation_enabled:
+            existing = next((obj for obj in normalized if obj['ann_id'] == nav_id), None)
+            if existing and existing.get('source_portal_id') != portal['portal_id']:
+                raise ValueError('门洞导航编号与现有对象冲突')
+            if not existing:
+                # An explicitly configured approach target, not proof the opening
+                # is traversable. Existing accessible-point planning is retained.
+                target = copy.deepcopy(portal)
+                target.update(ann_id=nav_id, source_portal_id=portal['portal_id'],
+                    category_zh=portal.get('display_name_zh') or portal.get('semantic_name') or '门洞',
+                    floor_xy=list(center[:2]), lifecycle='active',
+                    func_desc='门洞附近观察目标；通行未验证，不表示可穿越或进入。')
+                target.pop('doorways', None)
+                target.pop('navigation_pose', None)
+                target = _normalize_graph({'objects':[target]}, name)['objects'][0]
+                normalized.append(target)
+        portals.append({'portal_id':portal['portal_id'], 'category':portal.get('category') or 'Doorway',
+            'category_zh':portal.get('display_name_zh') or portal.get('semantic_name') or portal.get('category_zh') or '门洞',
+            'floor_xy':center[:2], 'anchor_ann_id':portal.get('anchor_ann_id'),
+            'member_ids':portal.get('member_ids') or [], 'status':portal.get('status'),
+            'navigation_ann_id':nav_id if navigation_enabled else None,
+            'navigation_mode':'approach' if navigation_enabled else None,
+            'traversability':portal.get('traversability') or 'not_verified', 'display_only':not navigation_enabled})
     return {
         "name": name,
         "frame": data.get("frame") or data.get("video_id") or "robot_map",
         "objects": normalized,
+        "doorways": portals,
         "func_relationships": data.get("func_relationships") or (data.get("relationships") or {}).get("functional", []),
         "pos_relationships": data.get("pos_relationships") or (data.get("relationships") or {}).get("positional", []),
     }
@@ -534,6 +600,21 @@ PERSON_MATCH_WEIGHTS = {
     "accessories": 0.10,
     "body_shape": 0.20,
 }
+
+
+def _parse_welcome_presence_result(raw: str) -> dict:
+    """The independent scene-only gate fails closed on malformed/ambiguous output."""
+    value = _parse_model_json_object(raw)
+    count = value.get("person_count") if isinstance(value, dict) else None
+    evidence = str(value.get("visible_evidence") or "").strip() if isinstance(value, dict) else ""
+    visible = bool(
+        isinstance(value, dict)
+        and value.get("person_visible") is True
+        and type(count) is int and count >= 1
+        and evidence and evidence not in {"实际可见的人体部位和衣着；无人则为空", "有人", "人"}
+    )
+    return {"person_visible": visible, "person_count": count if type(count) is int else 0,
+            "visible_evidence": evidence[:200], "schema_valid": isinstance(value, dict)}
 
 
 def _parse_person_reference_result(raw: str) -> dict:
@@ -671,6 +752,20 @@ def _parse_person_reference_result(raw: str) -> dict:
         fallback["comparisons"] = normalized
         return fallback
 
+    # Some local-model responses copy the requested JSON example verbatim. Those
+    # labels are not visual observations and must never produce a 1.0 match.
+    if region in {"候选位置或无", "无"} or any(
+        str(reference_features.get(key) or "").strip() == f"参考图{label}"
+        or str(candidate_features.get(key) or "").strip() == f"现场{label}"
+        for key, label in (("upper_clothing", "衣着"), ("face_hair", "头脸发型"),
+                           ("accessories", "配饰"), ("body_shape", "体型"))
+    ):
+        fallback["reason"] = "模型返回了 JSON 模板占位文字，缺少真实画面证据。"
+        fallback["candidate_visible"] = candidate_visible
+        fallback["candidate_region"] = region
+        fallback["comparisons"] = normalized
+        return fallback
+
     score = sum(
         PERSON_MATCH_WEIGHTS[key]
         for key, state in normalized.items()
@@ -740,7 +835,7 @@ def _parse_person_reference_result(raw: str) -> dict:
 class TaskVideoRecorder:
     """任务旁路录像器：失败只记日志，不影响导航、观察和寻物主流程。"""
 
-    def __init__(self, task_id: str, driver, fps: float = TASK_VIDEO_FPS, max_width: int = TASK_VIDEO_MAX_WIDTH):
+    def __init__(self, task_id: str, driver, fps: float = TASK_VIDEO_FPS, max_width: int = TASK_VIDEO_MAX_WIDTH, archive=None, media_scope=None):
         self.task_id = task_id
         self.driver = driver
         self.fps = float(fps)
@@ -748,6 +843,10 @@ class TaskVideoRecorder:
         self.video_id = uuid.uuid4().hex
         self.path = VIDEO_DIR / f"{self.video_id}.mp4"
         self.url = f"/videos/{self.video_id}.mp4"
+        self.archive = archive
+        if archive and media_scope:
+            self.path = archive.allocate(self.url, media_scope['conversation_id'], media_scope['turn_id'],
+                                         'videos', task_id, {'fps':self.fps})
         self.started_at = None
         self.finished_at = None
         self.frame_count = 0
@@ -858,6 +957,13 @@ class TaskVideoRecorder:
                     pass
             LOGGER.info("[video] recording stopped task_id=%r path=%s frames=%d error=%r",
                         self.task_id, self.path, self.frame_count, self.error)
+            if self.archive:
+                try:
+                    self.archive.record(self.url, status='failed' if self.error else 'finished',
+                                        started_at=self.started_at,finished_at=self.finished_at,
+                                        frame_count=self.frame_count,error=self.error)
+                except Exception:
+                    LOGGER.exception('[media] video index update failed')
 
 
 class TaskSafetyError(RuntimeError):
@@ -995,11 +1101,56 @@ class RobotTaskManager:
                     values.pop("finished_at", None)
                     values["status"] = "canceling"
                 self.task.update(values)
+                self._persist_task()
 
     def _update_step(self, index, **values):
         with self.lock:
             if self.task is not None and 0 <= index < len(self.task["steps"]):
                 self.task["steps"][index].update(values)
+                self._persist_task()
+
+    def _persist_task(self):
+        store = getattr(self.web, 'conversation_store', None)
+        if store and self.task and self.task.get('conversation_id'):
+            store.task(copy.deepcopy(self.task))
+            archive = getattr(self.web, 'media_archive', None)
+            if archive:
+                archive.task_record(self.task)
+
+    def bind_conversation(self, task_id, conversation_id, turn_id=None):
+        with self.lock:
+            if not self.task or self.task['id'] != task_id:
+                raise ValueError('任务已经变化，请重新规划')
+            if self.task.get('conversation_id') not in (None, conversation_id):
+                raise ValueError('任务不能转移到其他会话')
+            if turn_id and self.task.get('turn_id') not in (None, turn_id):
+                raise ValueError('任务不能转移到其他轮对话')
+            self.task['conversation_id'] = conversation_id
+            self.task['turn_id'] = turn_id or self.task.get('turn_id') or task_id
+            self._persist_task()
+            return copy.deepcopy(self.task)
+
+    def _media_scope(self):
+        check_cancelled()
+        task = self.snapshot() or {}
+        if task.get('conversation_id') and task.get('turn_id'):
+            return {key:task[key] for key in ('conversation_id','turn_id')} | {'task_id':task['id']}
+        return None
+
+    def _capture_path(self, capture_id, kind='observations', **metadata):
+        if getattr(self.web, 'media_archive', None):
+            return self.web.new_capture_path(capture_id, self._media_scope(), kind, metadata)
+        return self.web.capture_path(capture_id)
+
+    def _capture(self, kind='observations', **metadata):
+        if getattr(self.web, 'media_archive', None):
+            return self.web.capture(media_scope=self._media_scope(), kind=kind, metadata=metadata)
+        return self.web.capture()
+
+    def _record_capture(self, capture_id, **metadata):
+        archive = getattr(self.web, 'media_archive', None)
+        if archive:
+            archive.record(f'/captures/{capture_id}.jpg', **metadata)
 
     def _objects(self):
         return self.web.graph_snapshot()["objects"]
@@ -1179,7 +1330,7 @@ class RobotTaskManager:
             self.task = task
         return copy.deepcopy(task)
 
-    def plan_skill(self, skill_id, instruction, reference=None, **parameters):
+    def plan_skill(self, skill_id, instruction, reference=None, expected_map_snapshot=None, **parameters):
         """One adapter for robot skill proposals; confirmation still uses execute()."""
         if getattr(self.web, "mapping", None) and self.web.mapping.is_busy():
             raise RuntimeError("机器人正在建图，请先停止建图任务")
@@ -1188,6 +1339,8 @@ class RobotTaskManager:
                 raise RuntimeError("已有任务正在执行，请先停止当前任务")
             graph = self.web.graph_snapshot()
             map_snapshot = MapEvidence(graph).version
+            if expected_map_snapshot is not None and expected_map_snapshot != map_snapshot:
+                raise ValueError("地图已更新，请刷新地图后重新选择巡逻点")
             skill, args, plan = prepare_skill(skill_id, {"instruction": instruction, **parameters}, graph, reference)
             if skill.requires_reference:
                 if not isinstance(reference, dict):
@@ -1365,7 +1518,7 @@ class RobotTaskManager:
                 "target_names": [pickup_name],
                 "reason": (
                     f"每 {WELCOME_SNAPSHOT_INTERVAL_SECONDS:g} 秒抓拍识别目标人物，"
-                    "单帧高置信识别后立即进行语音确认"
+                    "发现疑似目标后展示现场照片，等待主人在网页确认"
                 ),
             },
             {
@@ -1374,7 +1527,7 @@ class RobotTaskManager:
                 "index": 2,
                 "status": "pending",
                 "target_names": [return_name],
-                "reason": "对方肯定身份后带领其返回所选地点",
+                "reason": "主人在网页确认后带领客人前往送客点",
             },
         ]
         task = {
@@ -1382,8 +1535,8 @@ class RobotTaskManager:
             "kind": "welcome",
             "instruction": instruction,
             "understanding": (
-                f"前往{pickup_name}等待参考照片中的人物；看到目标后询问“{WELCOME_QUESTION}”，"
-                f"得到肯定回答后带领对方返回{return_name}。否定回答后继续等待，未听清时重复询问。"
+                f"前往{pickup_name}等待参考照片中的人物；发现疑似目标后展示现场照片，"
+                f"等待主人在网页确认后带领客人前往{return_name}；拒绝后继续等待。"
             ),
             "status": "planned",
             "created_at": time.time(),
@@ -1460,6 +1613,7 @@ class RobotTaskManager:
             if status.get("estop_state") is not False:
                 raise TaskSafetyError("无法确认底盘急停状态，未启动任务，请先检查底盘连接")
             self.task.update({"status": "running", "started_at": time.time()})
+            self._persist_task()
             self.thread = threading.Thread(target=self._run, daemon=True, name="RobotWebTask")
             self.thread.start()
         return self.snapshot()
@@ -1470,10 +1624,12 @@ class RobotTaskManager:
                 raise ValueError("任务不存在")
             if self.task["status"] == "planned":
                 self.task.update({"status": "canceled", "finished_at": time.time()})
+                self._persist_task()
                 return self.snapshot()
             if self.task["status"] not in ("running", "canceling"):
                 return self.snapshot()
             self.task.update({"status": "canceling", "cancel_requested": True})
+            self._persist_task()
             driver = self.driver
             for stop_event, _ in getattr(self, "_capture_workers", []):
                 stop_event.set()
@@ -1513,7 +1669,9 @@ class RobotTaskManager:
         if not hasattr(driver, "grab_color_frame"):
             return None
         task = self.snapshot() or {}
-        recorder = TaskVideoRecorder(task.get("id") or uuid.uuid4().hex, driver)
+        archive = getattr(self.web, 'media_archive', None)
+        recorder = TaskVideoRecorder(task.get("id") or uuid.uuid4().hex, driver,
+                                     archive=archive, media_scope=self._media_scope() if archive else None)
         with self.lock:
             check_cancelled()
             self.video_recorder = recorder
@@ -1612,6 +1770,7 @@ class RobotTaskManager:
                 if self.task and self.task.get("cancel_requested"):
                     self.task.update(status="canceled", finished_at=time.time(),
                                      current_stage="任务已取消", current_search_stage=None)
+                self._persist_task()
 
     def _hardware_camera_driver(self):
         """Web 服务内复用相机管线，避免任务结束时释放 Orbbec SDK 导致进程崩溃。"""
@@ -1658,7 +1817,8 @@ class RobotTaskManager:
         source = HERE / "shot.jpg"
         capture_id = uuid.uuid4().hex
         if source.exists():
-            shutil.copyfile(source, self.web.capture_path(capture_id))
+            shutil.copyfile(source, self._capture_path(capture_id, ann_id=step.get('target_ann_id')))
+            self._record_capture(capture_id)
             image_url = f"/captures/{capture_id}.jpg"
         else:
             image_url = None
@@ -1674,12 +1834,10 @@ class RobotTaskManager:
     @staticmethod
     def _public_find_observation(comparison):
         """将模型内部比对说明转换成用户能直接理解的结果，不暴露拼图布局。"""
-        found = bool(comparison.get("found"))
-        confidence = str(comparison.get("confidence") or "").lower()
-        if found and confidence == "high":
+        if comparison.get("found") is True:
             return "已在当前现场确认找到与参考图外观一致的目标物品。"
-        if found:
-            return "现场疑似发现目标物品，但目前无法完全确认。"
+        if comparison.get("found") is not False:
+            return "当前照片识别结果格式错误，无法判断是否找到参考图中的物品。"
         return "未在当前现场发现与参考图外观匹配的目标物品。"
 
     def _find_object_match_value(self, ann_id, image_url, comparison, objects):
@@ -1696,8 +1854,9 @@ class RobotTaskManager:
             "text": self._public_find_observation(comparison),
             "model_reason": str(comparison.get("reason") or "").strip()[:500],
             "confidence": str(comparison.get("confidence") or ""),
-            "found": bool(comparison.get("found")),
-            "verdict": "match" if comparison.get("found") and comparison.get("confidence") == "high" else "miss",
+            "found": comparison.get("found") if type(comparison.get("found")) is bool else None,
+            "verdict": ("match" if comparison.get("found") is True else
+                        "miss" if comparison.get("found") is False else "uncertain"),
         }
 
     def _set_find_verdict(self, ann_id, verdict):
@@ -1712,21 +1871,17 @@ class RobotTaskManager:
 
     def _announce_find_observation(self, observation, comparison):
         check_cancelled()
-        target_label = str(self.task.get("target_label") or "物品")
         location = str(observation.get("name") or "当前点位")
-        position = str(observation.get("position") or "").strip()
-        if observation.get("in_transit"):
-            pose = observation.get("capture_pose") or {}
-            where = (
-                f"前往{location}途中（坐标 {float(pose.get('x', 0.0)):.2f},"
-                f" {float(pose.get('y', 0.0)):.2f}）"
-            )
+        location = CATEGORY_ZH_MAP.get(location.strip().lower(), location)
+        if re.search(r'[A-Za-z]', location) or not re.search(r'[\u4e00-\u9fff]', location):
+            location = '当前物体'
+        where = f"前往{location}途中" if observation.get("in_transit") else f"到达{location}"
+        if comparison.get("found") is True:
+            self.web.speak(f"{where}，找到参考图中的物体。")
+        elif comparison.get("found") is False:
+            self.web.speak(f"{where}，未找到参考图中的物体。")
         else:
-            where = f"{location}附近" if not position else f"{location}的{position}"
-        if comparison.get("found") and comparison.get("confidence") == "high":
-            self.web.speak(f"在{where}找到了{target_label}。")
-        else:
-            self.web.speak(f"在{where}没有找到{target_label}。")
+            self.web.speak(f"{where}，暂时无法确认参考图中的物体。")
 
     def _finish_find_object_match(self, index, match):
         check_cancelled()
@@ -1762,10 +1917,17 @@ class RobotTaskManager:
         with self.lock:
             check_cancelled()
             checked = len(self.task.get("checked_ann_ids") or [])
-            result_text = f"已完成 {checked} 个候选点的行进中抓拍与到点核验，仍未发现可信匹配。"
+            uncertain = sum(value == "uncertain" for value in self.task.get("candidate_status", {}).values())
+            if uncertain:
+                result_text = (
+                    f"已检查 {checked} 个候选点，其中 {uncertain} 个点的识别结果无效；"
+                    "其余点未找到目标，但不能确认目标不存在。"
+                )
+            else:
+                result_text = f"已完成 {checked} 个候选点的行进中抓拍与到点核验，仍未发现可信匹配。"
             self.task.update({
                 "result_text": result_text,
-                "status": "not_found",
+                "status": "inconclusive" if uncertain else "not_found",
                 "current_step": None,
                 "current_target_ann_id": None,
                 "current_search_stage": None,
@@ -1832,7 +1994,7 @@ class RobotTaskManager:
             with self.lock:
                 self.task["checked_ann_ids"].append(ann_id)
             self._set_find_verdict(ann_id, observation["verdict"])
-            self._update_step(index, status="succeeded", finished_at=time.time())
+            self._update_step(index, status="uncertain" if observation["verdict"] == "uncertain" else "succeeded", finished_at=time.time())
             self._announce_find_observation(observation, observation)
             if match is not None:
                 self._finish_find_object_match(index, match)
@@ -1865,9 +2027,83 @@ class RobotTaskManager:
         }
 
     def _set_patrol_baseline(self, ann_id, value):
+        check_cancelled()
         with self.lock:
             self.task.setdefault("patrol_baselines", {})[str(ann_id)] = value
             self.task.setdefault("patrol_status_by_ann", {})[str(ann_id)] = "baseline"
+            if value.get("capture_pose"):
+                self.task.setdefault("patrol_observation_poses", {}).setdefault(
+                    str(ann_id), copy.deepcopy(value["capture_pose"]),
+                )
+            self._persist_task()
+
+    @staticmethod
+    def _read_patrol_pose(driver):
+        check_cancelled()
+        pose = tuple(driver.get_pose())
+        if len(pose) != 3:
+            raise RuntimeError("巡逻无法读取有效的机器人位姿，已停止观察比较")
+        x, y, theta = map(float, pose)
+        if not all(math.isfinite(v) for v in (x, y, theta)):
+            raise RuntimeError("巡逻机器人位姿无效，已停止观察比较")
+        return {"x": x, "y": y, "theta": (theta + math.pi) % (2 * math.pi) - math.pi}
+
+    @staticmethod
+    def _check_patrol_pose(actual, expected, ann_id):
+        distance = math.hypot(actual["x"] - expected["x"], actual["y"] - expected["y"])
+        angle = abs((actual["theta"] - expected["theta"] + math.pi) % (2 * math.pi) - math.pi)
+        if distance > PATROL_POSE_DISTANCE_TOLERANCE_M or angle > PATROL_POSE_THETA_TOLERANCE_RAD:
+            raise RuntimeError(
+                f"巡逻点 #{ann_id} 观察位姿不一致：位置误差 {distance:.3f}m、"
+                f"朝向误差 {math.degrees(angle):.1f}°；已停止巡逻，未进行异常比较"
+            )
+
+    def _return_to_patrol_pose(self, driver, ann_id, pose):
+        """只导航到首轮保存的绝对位姿，不重新选点或面向物体中心。"""
+        check_cancelled()
+        if not isinstance(pose, dict) or any(
+            not isinstance(pose.get(k), (int, float)) or not math.isfinite(pose[k])
+            for k in ("x", "y", "theta")
+        ):
+            raise RuntimeError(f"巡逻点 #{ann_id} 缺少有效首轮观察位姿，请重新开始巡逻")
+        driver.move_location(
+            pose["x"], pose["y"], pose["theta"],
+            distance_tolerance=PATROL_POSE_DISTANCE_TOLERANCE_M,
+            theta_tolerance=PATROL_POSE_THETA_TOLERANCE_RAD,
+        )
+        status = driver.wait_until_settled()
+        check_cancelled()
+        if status == "succeeded":
+            self._check_patrol_pose(self._read_patrol_pose(driver), pose, ann_id)
+        with self.lock:
+            self.task.setdefault("logs", []).append({
+                "step_type": "navigate", "target_ann_id": ann_id,
+                "detail": f"回到首轮观察位姿 ({pose['x']:.3f},{pose['y']:.3f},θ={pose['theta']:.4f})",
+                "status": status,
+            })
+        return status
+
+    def _capture_patrol_at_pose(self, driver, ann_id, round_no, objects, expected=None):
+        """直接采集固定视角照片；不再让观察模型改变位置或朝向。"""
+        check_cancelled()
+        before = self._read_patrol_pose(driver)
+        if expected is not None:
+            self._check_patrol_pose(before, expected, ann_id)
+        capture_id = uuid.uuid4().hex
+        path = self._capture_path(capture_id, ann_id=ann_id, round=round_no)
+        captured_at = time.time()
+        driver.capture(str(path))
+        check_cancelled()
+        if not path.exists() or path.stat().st_size == 0:
+            raise RuntimeError(f"巡逻点 #{ann_id} 未生成有效观察画面")
+        after = self._read_patrol_pose(driver)
+        self._check_patrol_pose(after, before, ann_id)
+        if expected is not None:
+            self._check_patrol_pose(after, expected, ann_id)
+        self._record_capture(capture_id, captured_at=captured_at, capture_pose=before)
+        current = self._patrol_capture_value(ann_id, capture_id, round_no, objects)
+        current.update(capture_pose=before, captured_at=captured_at)
+        return current, path
 
     def _record_patrol_comparison(self, baseline, current, comparison):
         check_cancelled()
@@ -1909,7 +2145,7 @@ class RobotTaskManager:
             status="anomaly", anomaly=value, result_text=result,
             current_step=None, current_target_ann_id=value["ann_id"], finished_at=time.time(),
         )
-        self.web.speak(result)
+        self.web.speak("发现异常")
 
     def _finish_patrol_normal(self, step_index, rounds):
         check_cancelled()
@@ -1940,7 +2176,9 @@ class RobotTaskManager:
                     self._update_step(step_index, status=status, finished_at=time.time())
                     self._update(status="canceled" if status == "canceled" else "aborted", finished_at=time.time())
                     return
-                capture_id, _ = self.web.capture()
+                if round_no == 1:
+                    self.web.speak(f"到达{self._patrol_location(ann_id, objects)}")
+                capture_id, _ = self._capture(ann_id=ann_id, round=round_no)
                 current = self._patrol_capture_value(ann_id, capture_id, round_no, objects)
                 baseline = self.task.get("patrol_baselines", {}).get(str(ann_id))
                 if baseline is None:
@@ -1961,6 +2199,7 @@ class RobotTaskManager:
                 if value["abnormal"]:
                     self._finish_patrol_anomaly(step_index, value)
                     return
+                self.web.speak("无异常")
         self._finish_patrol_normal(step_index, max_rounds)
 
     @staticmethod
@@ -1984,17 +2223,72 @@ class RobotTaskManager:
             time.sleep(min(0.2, max(0.0, deadline - time.monotonic())))
         return not self._canceled()
 
+    def confirm_welcome_guest(self, task_id, confirmation_id, accepted, conversation_id):
+        """Only the owning conversation may decide on the currently displayed photo."""
+        if type(accepted) is not bool:
+            raise ValueError("请明确确认或拒绝本次人物识别")
+        with self.lock:
+            task = self.task or {}
+            pending = task.get("guest_confirmation") or {}
+            if task.get("id") != task_id or task.get("kind") != "welcome":
+                raise ValueError("迎宾任务不存在或已被替换")
+            if task.get("conversation_id") != conversation_id:
+                raise ValueError("请在发起迎宾任务的会话中确认")
+            if (task.get("status") != "running" or task.get("cancel_requested")
+                    or task.get("current_step") != 1):
+                raise ValueError("当前任务不再等待人物确认")
+            if not confirmation_id or pending.get("id") != confirmation_id or pending.get("status") != "pending":
+                raise ValueError("这张照片的确认已处理或已失效，请刷新任务")
+            pending.update(status="accepted" if accepted else "rejected", decided_at=time.time())
+            task["current_stage"] = "主人已确认，准备前往送客点" if accepted else "主人拒绝本次识别，继续等待目标人物"
+            self._persist_task()
+            LOGGER.info("[welcome] web confirmation task_id=%s accepted=%s", task_id, accepted)
+            return self.snapshot()
+
+    def _wait_welcome_confirmation(self, observation):
+        """Pause detection and motion until a photo-specific web decision or cancellation."""
+        check_cancelled()
+        if not observation.get("image_url"):
+            raise RuntimeError("缺少现场照片，不能请求迎宾确认")
+        confirmation_id = uuid.uuid4().hex
+        with self.lock:
+            if self._canceled():
+                return False
+            task_id = self.task["id"]
+            self._update(guest_confirmation={
+                "id": confirmation_id, "status": "pending",
+                "image_url": observation["image_url"],
+                "captured_at": observation.get("captured_at"), "requested_at": time.time(),
+            }, current_stage="发现疑似目标客人，等待主人在网页确认")
+        self.web.speak("小卡识别到目标客人，等待主人确认中")
+        while True:
+            with self.lock:
+                task = self.task or {}
+                pending = task.get("guest_confirmation") or {}
+                if (task.get("id") != task_id or task.get("cancel_requested")
+                        or task.get("status") != "running" or pending.get("id") != confirmation_id):
+                    return False
+                if pending.get("status") == "accepted":
+                    self._update_step(1, status="succeeded", finished_at=time.time())
+                    return True
+                if pending.get("status") == "rejected":
+                    self._update(rejected_count=int(task.get("rejected_count") or 0) + 1)
+                    return False
+            if not self._wait_cancellable(0.2):
+                return False
+
     def _capture_welcome_snapshot(self, driver, objects):
-        """迎宾点抓拍一帧并计分；单帧高置信命中后立即发布并进入语音确认。"""
+        """迎宾点抓拍一帧并计分；高置信命中后发布照片供主人确认。"""
         task = self.snapshot() or {}
         ann_id = int(task["pickup_ann_id"])
         capture_id = uuid.uuid4().hex
-        capture_path = self.web.capture_path(capture_id)
+        capture_path = None
         task_id = task.get("id")
         try:
             if driver is None:
-                capture_id, capture_path = self.web.capture()
+                capture_id, capture_path = self._capture('snapshots', ann_id=ann_id, stage='迎宾点人物检测')
             else:
+                capture_path = self._capture_path(capture_id, 'snapshots', ann_id=ann_id, stage='迎宾点人物检测')
                 driver.capture(str(capture_path))
         except TaskCancelled:
             raise
@@ -2009,6 +2303,7 @@ class RobotTaskManager:
             )
             raise RuntimeError(f"迎宾抓拍失败: {exc}") from exc
 
+        self._record_capture(capture_id, captured_at=time.time())
         try:
             comparison = guarded_call(self.web.compare_person_reference, task.get("reference") or {}, capture_path)
         except TaskCancelled:
@@ -2037,7 +2332,7 @@ class RobotTaskManager:
             "y": float(xy[1]),
             "image_url": f"/captures/{capture_id}.jpg",
             "text": (
-                "现场发现与迎宾参考图外观一致的人物，正在进行语音确认。"
+                "现场发现与参考图外观相似的人物，请主人核对照片并确认。"
                 if matched
                 else "本次抓拍未确认发现目标人物。"
             ),
@@ -2051,6 +2346,7 @@ class RobotTaskManager:
             "captured_at": time.time(),
             "stage": "迎宾点人物检测",
         }
+        self._record_capture(capture_id, analysis=comparison)
         with self.lock:
             if self.task:
                 check_cancelled()
@@ -2096,13 +2392,14 @@ class RobotTaskManager:
                 reference = self.task.get("reference") or {}
                 source = self.web.reference_path(reference["reference_id"], reference["suffix"])
             capture_id = uuid.uuid4().hex
-            capture_path = self.web.capture_path(capture_id)
+            capture_path = self._capture_path(capture_id, 'snapshots', stage='模拟迎宾检测')
             shutil.copyfile(source, capture_path)
+            self._record_capture(capture_id)
             observation = {
                 "ann_id": pickup_ann_id,
                 "name": self.task.get("pickup_name"),
                 "image_url": f"/captures/{capture_id}.jpg",
-                "text": "模拟发现目标人物，正在进行语音确认。",
+                "text": "模拟发现目标人物，等待主人在网页确认。",
                 "found": True,
                 "confidence": "high",
                 "stage": "迎宾点人物检测",
@@ -2111,25 +2408,7 @@ class RobotTaskManager:
             with self.lock:
                 self.task["snapshot_count"] = int(self.task.get("snapshot_count") or 0) + 1
                 self.task["observations"].append(observation)
-            while not self._canceled():
-                self._update(current_stage="发现疑似目标人物，等待语音确认")
-                heard = self.web.ask_and_listen(WELCOME_QUESTION)
-                intent = self._welcome_voice_intent(heard)
-                self._update(last_heard_text=heard)
-                if intent == "affirmative":
-                    accepted = True
-                    self._update_step(1, status="succeeded", finished_at=time.time())
-                    break
-                if intent == "negative":
-                    self._update(
-                        rejected_count=int(self.task.get("rejected_count") or 0) + 1,
-                        current_stage="对方否认，继续等待目标人物",
-                    )
-                    break
-                self._update(
-                    unclear_count=int(self.task.get("unclear_count") or 0) + 1,
-                    current_stage="未听清回答，正在重新询问",
-                )
+            accepted = self._wait_welcome_confirmation(observation)
         if self._canceled():
             self._update_step(1, status="canceled", finished_at=time.time())
             self._update(status="canceled", finished_at=time.time())
@@ -2219,11 +2498,15 @@ class RobotTaskManager:
 
             image = cv2.imread(str(source))
             if image is not None:
-                cv2.imwrite(str(self.web.capture_path(capture_id)), image)
+                cv2.imwrite(str(self._capture_path(capture_id, ann_id=ann_id)), image)
+                self._record_capture(capture_id, observation=log.observation or '')
                 image_url = f"/captures/{capture_id}.jpg"
-        value = {"ann_id": ann_id, "text": log.observation or "", "image_url": image_url}
+        value = {"ann_id": ann_id, "text": log.observation or "", "image_url": image_url,
+                 "observed_at": time.time(), "task_id": self.task.get('id'),
+                 "source_type": "task_observation_not_live"}
         with self.lock:
             self.task["observations"].append(value)
+            self._persist_task()
         return value
 
     def _append_executor_logs(self, executor, start_index):
@@ -2248,13 +2531,15 @@ class RobotTaskManager:
         """
         self._update(current_search_stage=stage)
         capture_id = uuid.uuid4().hex
-        capture_path = self.web.capture_path(capture_id)
+        kind = 'observations' if publish_mode == 'always' else 'snapshots'
+        capture_path = None
         task_id = (self.snapshot() or {}).get("id")
         captured_pose = None
         try:
             if driver is None:
-                capture_id, capture_path = self.web.capture()
+                capture_id, capture_path = self._capture(kind, ann_id=ann_id, stage=stage, **motion)
             else:
+                capture_path = self._capture_path(capture_id, kind, ann_id=ann_id, stage=stage, **motion)
                 driver.capture(str(capture_path))
                 if str(stage).startswith("行进中"):
                     try:
@@ -2277,11 +2562,27 @@ class RobotTaskManager:
                 capture_path=str(capture_path),
             )
             raise RuntimeError(f"reference snapshot camera capture failed at ann_id={ann_id}: {exc}") from exc
+        self._record_capture(capture_id, captured_at=time.time(), capture_pose=captured_pose)
         # 视觉比对只接收参考图本身，不传物品名称或地图位置，避免模型被
         # “水杯”“白板附近”等文字先验诱导成类别匹配或定向猜测。
         model_reference = dict(reference or {})
         try:
-            comparison = guarded_call(self.web.compare_reference, model_reference, capture_path)
+            try:
+                comparison = guarded_call(self.web.compare_reference, model_reference, capture_path)
+            except ValueError as exc:
+                if "寻物识别结果格式异常" not in str(exc):
+                    raise
+                LOGGER.warning("[snapshot] invalid reference result; retrying same photos task_id=%r ann_id=%r", task_id, ann_id)
+                try:
+                    comparison = guarded_call(self.web.compare_reference, model_reference, capture_path)
+                except ValueError as retry_exc:
+                    if "寻物识别结果格式异常" not in str(retry_exc):
+                        raise
+                    LOGGER.warning("[snapshot] invalid reference result after retry; verdict unknown task_id=%r ann_id=%r", task_id, ann_id)
+                    comparison = {
+                        "found": None, "confidence": "low", "schema_valid": False,
+                        "reason": "同一组照片的两次识别结果均格式错误，无法判断是否找到。",
+                    }
         except TaskCancelled:
             raise
         except Exception as exc:
@@ -2309,6 +2610,7 @@ class RobotTaskManager:
                 "position": f"行进中抓拍坐标({pose_x:.2f},{pose_y:.2f})",
             })
         matched = observation["verdict"] == "match"
+        self._record_capture(capture_id, analysis=comparison, matched=matched)
         attempt = {
             **copy.deepcopy(observation),
             "stage": stage,
@@ -2338,7 +2640,7 @@ class RobotTaskManager:
         }
 
     def _start_reference_snapshot_loop(self, driver, ann_id, objects, stop_event, result, stage="行进中抓拍检测"):
-        """后台周期抓拍；单帧高置信命中后立即发布并请求停止移动。"""
+        """后台周期抓拍；明确命中即发布，到点交接保留在途结果，取消仍丢弃。"""
         reference = copy.deepcopy(self.task.get("reference") or {})
         task_id = (self.snapshot() or {}).get("id")
 
@@ -2376,14 +2678,23 @@ class RobotTaskManager:
                         break
                 else:
                     consecutive_errors = 0
-                    # 到达点后主线程会先置 stop_event，再等待本线程退出，然后才开始
-                    # 朝向修正。丢弃恰好跨越到达时刻完成的行进检测，正式结果由到点
-                    # 后唯一的一张照片给出。
-                    if stop_event.is_set() or self._canceled():
+                    # 到点 stop_event 只停止新增采集，不否决已经在处理的命中。
+                    # 取消、失败或任务替换则不能发布结果或触发后续动作。
+                    if self._canceled():
+                        break
+                    with self.lock:
+                        if (not self.task or self.task.get("id") != task_id
+                                or self.task.get("status") != "running"):
+                            break
+                    if stop_event.is_set() and not probe.get("matched"):
                         break
                     if probe.get("matched"):
                         with self.lock:
                             check_cancelled()
+                            if (self._canceled() or not self.task
+                                    or self.task.get("id") != task_id
+                                    or self.task.get("status") != "running"):
+                                break
                             if self.task:
                                 self.task.setdefault("search_attempts", []).append(probe["attempt"])
                                 self.task["search_attempts"] = self.task["search_attempts"][-12:]
@@ -2392,11 +2703,12 @@ class RobotTaskManager:
                             "publish=True image=%s",
                             task_id, ann_id, probe["capture_path"],
                         )
+                        already_stopped = stop_event.is_set()
                         result["match"] = probe["observation"]
                         result["comparison"] = probe["comparison"]
                         stop_event.set()
                         try:
-                            if driver is not None:
+                            if driver is not None and not already_stopped:
                                 driver.cancel_move()
                         except Exception:
                             pass
@@ -2457,10 +2769,16 @@ class RobotTaskManager:
                 with self.lock:
                     self.task["patrol_status_by_ann"][str(ann_id)] = "active"
                 before_log = len(executor.log)
-                status = executor._do_navigate({
-                    "type": "navigate", "target_ann_id": ann_id,
-                    "use_viewpoint": bool(objects[ann_id].get("viewpoint")),
-                })
+                fixed_pose = None
+                if round_no == 1:
+                    status = executor._do_navigate({
+                        "type": "navigate", "target_ann_id": ann_id,
+                        "use_viewpoint": bool(objects[ann_id].get("viewpoint")),
+                        "_announce_arrival": False,
+                    })
+                else:
+                    fixed_pose = copy.deepcopy(self.task.get("patrol_observation_poses", {}).get(str(ann_id)))
+                    status = self._return_to_patrol_pose(driver, ann_id, fixed_pose)
                 self._append_executor_logs(executor, before_log)
                 if status != "succeeded":
                     self._update_step(step_index, status=status, finished_at=time.time())
@@ -2475,34 +2793,26 @@ class RobotTaskManager:
                     )
                     return
 
-                before_observe = len(executor.log)
-                observe_status = executor._do_observe({
-                    "type": "observe",
-                    "target_ann_id": ann_id,
-                    "question": "确认巡逻目标在画面中，并拍摄适合与历史基线比较的现场环境。",
-                    "fine_adjust": True,
-                })
-                self._append_executor_logs(executor, before_observe)
-                if observe_status != "succeeded":
-                    self._update_step(step_index, status=observe_status, finished_at=time.time())
-                    self._update(
-                        status="error", current_target_ann_id=ann_id,
-                        error=f"巡逻点 #{ann_id} 到点后未找到目标，已停止巡逻。",
-                        finished_at=time.time(),
-                    )
-                    return
-                source = HERE / f"obs_ann{ann_id}.png"
-                if not source.exists():
-                    raise RuntimeError(f"巡逻点 #{ann_id} 未生成有效观察画面")
-                import cv2
-
-                image = cv2.imread(str(source))
-                if image is None:
-                    raise RuntimeError(f"巡逻点 #{ann_id} 的观察画面无法读取")
-                capture_id = uuid.uuid4().hex
-                capture_path = self.web.capture_path(capture_id)
-                cv2.imwrite(str(capture_path), image)
-                current = self._patrol_capture_value(ann_id, capture_id, round_no, objects)
+                if round_no == 1:
+                    self.web.speak(f"到达{self._patrol_location(ann_id, objects)}")
+                    before_observe = len(executor.log)
+                    observe_status = executor._do_observe({
+                        "type": "observe", "target_ann_id": ann_id,
+                        "question": "确认巡逻目标在画面中，并拍摄适合与历史基线比较的现场环境。",
+                        "fine_adjust": True, "_announce_observation": False,
+                    })
+                    self._append_executor_logs(executor, before_observe)
+                    if observe_status != "succeeded":
+                        self._update_step(step_index, status=observe_status, finished_at=time.time())
+                        self._update(
+                            status="error", current_target_ann_id=ann_id,
+                            error=f"巡逻点 #{ann_id} 到点后未找到目标，已停止巡逻。",
+                            finished_at=time.time(),
+                        )
+                        return
+                current, capture_path = self._capture_patrol_at_pose(
+                    driver, ann_id, round_no, objects, expected=fixed_pose,
+                )
                 baseline = self.task.get("patrol_baselines", {}).get(str(ann_id))
                 if baseline is None:
                     self._set_patrol_baseline(ann_id, current)
@@ -2514,6 +2824,7 @@ class RobotTaskManager:
                 if value["abnormal"]:
                     self._finish_patrol_anomaly(step_index, value)
                     return
+                self.web.speak("无异常")
         self._finish_patrol_normal(step_index, round_no)
 
     def _run_welcome_navigation(self, executor, step_index, ann_id, stage):
@@ -2535,7 +2846,7 @@ class RobotTaskManager:
         return status
 
     def _run_welcome_hardware(self):
-        """前往接人点，按配置间隔识别人像；语音确认后带领客人返回指定点。"""
+        """前往接人点识别人像；主人在网页确认现场照片后前往送客点。"""
         from qwen_planner import PlanExecutor
 
         objects = {int(obj["ann_id"]): obj for obj in self._objects()}
@@ -2603,31 +2914,7 @@ class RobotTaskManager:
             if self._canceled():
                 break
             if matched:
-                self._update(current_stage="发现疑似目标人物，等待语音确认")
-                while not self._canceled():
-                    heard = self.web.ask_and_listen(WELCOME_QUESTION)
-                    intent = self._welcome_voice_intent(heard)
-                    self._update(last_heard_text=heard)
-                    LOGGER.info(
-                        "[welcome] voice confirmation task_id=%r intent=%r heard=%r",
-                        (self.snapshot() or {}).get("id"),
-                        intent,
-                        heard[:100],
-                    )
-                    if intent == "affirmative":
-                        accepted = True
-                        self._update_step(1, status="succeeded", finished_at=time.time())
-                        break
-                    if intent == "negative":
-                        self._update(
-                            rejected_count=int(self.task.get("rejected_count") or 0) + 1,
-                            current_stage="对方否认，继续等待目标人物",
-                        )
-                        break
-                    self._update(
-                        unclear_count=int(self.task.get("unclear_count") or 0) + 1,
-                        current_stage="未听清回答，正在重新询问",
-                    )
+                accepted = self._wait_welcome_confirmation(_observation)
                 if accepted:
                     break
 
@@ -2802,6 +3089,7 @@ class RobotTaskManager:
             try:
                 status = executor._do_navigate({
                     "type": "navigate", "target_ann_id": ann_id, "use_viewpoint": False,
+                    "_announce_arrival": False,
                     "_on_motion_started": start_transit_snapshots_after_move_command,
                     "_on_translation_arrived": stop_transit_snapshots_before_facing,
                 })
@@ -2862,7 +3150,7 @@ class RobotTaskManager:
             with self.lock:
                 self.task["checked_ann_ids"].append(ann_id)
             self._set_find_verdict(ann_id, observation["verdict"])
-            self._update_step(index, status="succeeded", finished_at=time.time())
+            self._update_step(index, status="uncertain" if observation["verdict"] == "uncertain" else "succeeded", finished_at=time.time())
             self._announce_find_observation(observation, observation)
             if match is not None:
                 self._finish_find_object_match(index, match)
@@ -3357,12 +3645,22 @@ class RobotWebState:
         self.voice_lock = threading.Lock()
         self.agent_lock = threading.Lock()
         self.agent_sessions = {}
+        from robot_memory import ConversationStore
+        self.conversation_store = ConversationStore(os.getenv('JAKA_CONVERSATION_DB', str(HERE / 'conversation_data' / 'conversations.sqlite3')))
+        self.conversation_store.claim_runtime()
+        self.conversation_store.recover()
+        from robot_media import MediaArchive
+        self.media_archive = MediaArchive(self.conversation_store,
+            os.getenv('JAKA_MEDIA_ROOT', str(self.conversation_store.path.parent / 'media')),
+            CAPTURE_DIR, VIDEO_DIR)
         self.graph_lock = threading.RLock()
         self.slam_lock = threading.RLock()
         self.voice = None
         CAPTURE_DIR.mkdir(parents=True, exist_ok=True)
         VIDEO_DIR.mkdir(parents=True, exist_ok=True)
-        _clean_old_captures()
+        # Browser-only historical conversations may be imported on a later visit.
+        # Do not age-delete their photos before their ownership has been migrated.
+        # Media retention is explicit maintenance now, not a startup side effect.
         self.graph = self._load_initial_graph()
         self.slam_image_path = None
         self.slam_calibration = None
@@ -3650,7 +3948,9 @@ class RobotWebState:
 
     def graph_snapshot(self):
         with self.graph_lock:
-            return copy.deepcopy(self.graph)
+            graph = copy.deepcopy(self.graph)
+        graph["snapshot"] = MapEvidence(graph).version
+        return graph
 
     def map_files(self):
         """列出脚本目录下可转换为导航地图的 JSON, 大文件只在选择时完整返回。"""
@@ -3687,29 +3987,36 @@ class RobotWebState:
             self.graph = graph
         return self.graph_snapshot()
 
-    @staticmethod
-    def capture_path(capture_id: str) -> Path:
+    def capture_path(self, capture_id: str) -> Path:
         if not CAPTURE_ID_RE.fullmatch(capture_id or ""):
             raise ValueError("非法 capture_id")
-        return CAPTURE_DIR / f"{capture_id}.jpg"
+        archive = getattr(self, 'media_archive', None)
+        return archive.resolve(f'/captures/{capture_id}.jpg') if archive else CAPTURE_DIR / f"{capture_id}.jpg"
 
-    @staticmethod
-    def reference_path(reference_id: str, suffix: str) -> Path:
+    def reference_path(self, reference_id: str, suffix: str) -> Path:
         if not CAPTURE_ID_RE.fullmatch(reference_id or ""):
             raise ValueError("非法 reference_id")
         if suffix not in REFERENCE_IMAGE_TYPES:
             raise ValueError("图片格式不支持")
-        return CAPTURE_DIR / f"{reference_id}{suffix}"
+        archive = getattr(self, 'media_archive', None)
+        return archive.resolve(f'/references/{reference_id}{suffix}') if archive else CAPTURE_DIR / f"{reference_id}{suffix}"
 
-    def save_reference_image(self, name: str, encoded: str) -> dict:
+    def new_capture_path(self, capture_id, media_scope=None, kind='observations', metadata=None):
+        archive = getattr(self, 'media_archive', None)
+        if archive and media_scope:
+            return archive.allocate(f'/captures/{capture_id}.jpg', media_scope['conversation_id'],
+                                    media_scope['turn_id'], kind, media_scope.get('task_id'), metadata)
+        return self.capture_path(capture_id)
+
+    def save_reference_image(self, name: str, encoded: str, media_scope=None) -> dict:
         """兼容旧 JSON 上传格式；Web 页面发送原始图片字节。"""
         try:
             payload = base64.b64decode(encoded, validate=True)
         except Exception as exc:
             raise ValueError("参考图片不是合法 Base64") from exc
-        return self.save_reference_upload(name, payload)
+        return self.save_reference_upload(name, payload, media_scope=media_scope)
 
-    def save_reference_upload(self, name: str, payload: bytes) -> dict:
+    def save_reference_upload(self, name: str, payload: bytes, media_scope=None) -> dict:
         """校验并保存原始参考图片，避免 Base64 编解码。"""
         suffix = Path(name).suffix.lower()
         info = REFERENCE_IMAGE_TYPES.get(suffix)
@@ -3722,7 +4029,13 @@ class RobotWebState:
             raise ValueError("参考图片内容与文件格式不匹配")
         reference_id = uuid.uuid4().hex
         path = self.reference_path(reference_id, suffix)
+        archive = getattr(self, 'media_archive', None)
+        url = f'/references/{reference_id}{suffix}'
+        if archive and media_scope:
+            path = archive.allocate(url, media_scope['conversation_id'], media_scope['turn_id'], 'uploads',
+                                    metadata={'original_name':str(name)[:255]})
         path.write_bytes(payload)
+        if archive: archive.record(url)
         return {
             "reference_id": reference_id,
             "suffix": suffix,
@@ -3730,16 +4043,17 @@ class RobotWebState:
             "image_url": f"/references/{reference_id}{suffix}",
         }
 
-    def capture(self) -> tuple[str, Path]:
+    def capture(self, media_scope=None, kind='observations', metadata=None) -> tuple[str, Path]:
         """拍一张彩色图; 同一时刻只允许一个请求占用 Orbbec。"""
         capture_id = uuid.uuid4().hex
-        path = self.capture_path(capture_id)
+        path = self.new_capture_path(capture_id, media_scope, kind, metadata)
         with self.camera_lock:
             if self.mock:
                 source = HERE / "shot.jpg"
                 if not source.exists():
                     raise RuntimeError("mock 模式需要脚本目录下存在 shot.jpg")
                 shutil.copyfile(source, path)
+                if getattr(self, 'media_archive', None): self.media_archive.record(f'/captures/{capture_id}.jpg')
                 return capture_id, path
 
             try:
@@ -3747,10 +4061,11 @@ class RobotWebState:
             except Exception as exc:
                 LOGGER.warning("[camera] scene capture failed type=%s", type(exc).__name__)
                 raise ToolInputError("本次相机采集失败，请检查相机连接或占用后重试；不是机器人不具备视觉能力。") from exc
+        if getattr(self, 'media_archive', None): self.media_archive.record(f'/captures/{capture_id}.jpg', captured_at=time.time())
         return capture_id, path
 
     def agent_complete(self, messages, tools):
-        """Use the native tool template; validate emitted Qwen-style calls ourselves."""
+        """Adapt native/JSON serving protocols; the runner validates both alike."""
         from qwen_planner import PLAN_MODEL, _client
 
         # Optional decision-model endpoint. Vision continues using VISION_MODEL
@@ -3761,6 +4076,23 @@ class RobotWebState:
             client = OpenAI(base_url=agent_base, api_key=os.getenv("JAKA_AGENT_API_KEY", "EMPTY"))
         else:
             client = _client()
+        protocol = os.getenv("JAKA_AGENT_PROTOCOL", "native").strip()
+        if protocol not in ("native", "json"):
+            raise ValueError("JAKA_AGENT_PROTOCOL must be native or json")
+        if protocol == "json":
+            from robot_agent import json_transport_messages
+            response = client.with_options(timeout=45, max_retries=0).chat.completions.create(
+                model=os.getenv("JAKA_AGENT_MODEL", "").strip() or PLAN_MODEL,
+                messages=json_transport_messages(messages, tools),
+                response_format={"type": "json_object"}, temperature=0, max_tokens=1200,
+            )
+            choice = response.choices[0]
+            if getattr(choice, "finish_reason", None) == "length":
+                LOGGER.warning("[agent-protocol] JSON response exceeded output limit")
+                return "{truncated response"
+            # The runner enforces the allowlist, argument types and final intent.
+            # Do not silently convert unstructured text into finish_response.
+            return _json_text(choice.message.content)
         response = client.with_options(timeout=45, max_retries=0).chat.completions.create(
             model=os.getenv("JAKA_AGENT_MODEL", "").strip() or PLAN_MODEL,
             messages=messages, tools=tools,
@@ -3797,6 +4129,36 @@ class RobotWebState:
             )
         return format_visual_answer(_json_text(response.choices[0].message.content))
 
+    def conversation_task(self, conversation_id):
+        task = self.tasks.snapshot()
+        if task and task.get('conversation_id') == conversation_id:
+            return task
+        # Unowned compatibility tasks are never injected into a named conversation.
+        store = getattr(self, 'conversation_store', None)
+        return store.latest_task(conversation_id) if store and conversation_id else None
+
+    def plan_for_conversation(self, conversation_id, callback, turn_id=None):
+        store = getattr(self, 'conversation_store', None)
+        if not store:
+            return callback()
+        store.conversation(conversation_id)
+        with self.tasks.lock:
+            prior = self.tasks.snapshot()
+            if prior and prior.get('status') in ('planned', 'needs_clarification') and prior.get('conversation_id') != conversation_id:
+                raise ToolInputError('机器人有其他会话的待确认任务，请先处理该任务')
+            task = callback()
+            if prior and prior.get('status') in ('planned', 'needs_clarification'):
+                prior.update(status='superseded', finished_at=time.time())
+                store.task(prior)
+            return self.tasks.bind_conversation(task['id'], conversation_id, turn_id)
+
+    def require_task_owner(self, task_id, conversation_id):
+        if not getattr(self, 'conversation_store', None):
+            return
+        task = self.tasks.snapshot()
+        if not task or task.get('id') != task_id or task.get('conversation_id') != conversation_id:
+            raise ValueError('任务不属于当前会话，或已失效；请重新打开所属会话')
+
     def agent_chat(self, payload, emit=None):
         """Bounded, per-conversation evidence memory; no inferred action dispatch."""
         clean_history(payload.get("history", []))
@@ -3804,12 +4166,21 @@ class RobotWebState:
         if not isinstance(question, str) or not question.strip() or len(question) > 4000:
             raise ValueError("问题必须是 1～4000 字符的文字")
         session_id = payload.get("conversation_id")
+        store = getattr(self, 'conversation_store', None)
+        if store:
+            from robot_memory import valid_id
+            valid_id(session_id)
+            store.conversation(session_id)
+            user_id = valid_id(payload.get('user_message_id') or uuid.uuid4().hex)
+            assistant_id = valid_id(payload.get('assistant_message_id') or uuid.uuid4().hex)
         if session_id is not None and (not isinstance(session_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{8,128}", session_id)):
             raise ValueError("会话标识无效")
         if not self.agent_lock.acquire(blocking=False):
             raise RuntimeError("小卡正在处理另一条对话，请稍后再试")
         try:
             sessions = getattr(self, "agent_sessions", {})
+            if store:
+                store.validate_turn_ids(session_id, user_id, assistant_id)
             self.agent_sessions = sessions
             now = time.time()
             for key in list(sessions):
@@ -3822,7 +4193,8 @@ class RobotWebState:
                     initial_history.append({"role": item["role"], "text": item["text"][:2000],
                         "capture_id": item.get("capture_id") if isinstance(item.get("capture_id"), str)
                         and CAPTURE_ID_RE.fullmatch(item["capture_id"]) else None})
-            memory = copy.deepcopy(sessions.get(session_id, {"history": initial_history, "evidence": []}))
+            memory = (store.load_memory(session_id) if store else
+                      copy.deepcopy(sessions.get(session_id, {"history": initial_history, "evidence": []})))
             memory.setdefault("pending_request", None)
             memory.setdefault("focus", None)
             memory.setdefault("last_scene", None)
@@ -3838,7 +4210,23 @@ class RobotWebState:
                     raise ValueError("目标选项已失效，请重新查询地图并选择")
             memory["confirmed_target"] = selection
             memory["turn_goal"] = question
+            if store:
+                user_message = {'id': user_id, 'role': 'user', 'text': question, 'createdAt': time.time()*1000}
+                reference = payload.get('reference')
+                if reference:
+                    if not isinstance(reference, dict):
+                        raise ValueError('参考图片元信息无效')
+                    url = reference.get('image_url', '')
+                    if url != f"/references/{reference.get('reference_id')}{reference.get('suffix')}" or not store.owns_media(session_id, url):
+                        raise ValueError('参考图片未绑定当前会话，请重新上传')
+                    user_message.update(referenceImage=url, referenceStoredImage=url)
+                store.start_turn(session_id, user_message, assistant_id)
+                store.event(session_id, 'user_message', user_message)
+                if getattr(self, 'media_archive', None):
+                    self.media_archive.prepare_turn(session_id, user_id, question)
             turn = {**payload, "history": memory["history"]}
+            if store:
+                turn['user_message_id'] = user_id
             def save_exchange(answer):
                 memory["history"] = (memory["history"] + [
                     {"role": "user", "text": question[:2000]},
@@ -3848,6 +4236,20 @@ class RobotWebState:
                                            "incomplete": bool(answer.get("incomplete"))}
                 memory["updated_at"] = time.time()
                 memory.pop("turn_goal", None)
+                if store:
+                    message = {'id': assistant_id, 'role': 'assistant', 'text': answer['text'],
+                               'createdAt': time.time()*1000, 'state': 'done',
+                               'incomplete': bool(answer.get('incomplete'))}
+                    for source, dest in {'capture_id':'captureId', 'image_url':'image', 'image_source':'imageSource',
+                            'tool_trace':'toolTrace','execution':'execution','response_kind':'responseKind',
+                            'target_choices':'targetChoices','target_choice_snapshot':'targetChoiceSnapshot', 'task':'task'}.items():
+                        if source in answer:
+                            message[dest] = answer[source]
+                    if answer.get('task'):
+                        message['taskId'] = answer['task']['id']
+                    store.message(session_id, message)
+                    store.event(session_id, 'assistant_message', message)
+                    store.save_memory(session_id, memory)
                 if session_id:
                     if session_id not in sessions and len(sessions) >= 64:
                         del sessions[min(sessions, key=lambda key: sessions[key]["updated_at"])]
@@ -3883,6 +4285,8 @@ class RobotWebState:
     def _agent_chat_turn(self, payload, emit, memory):
         question = payload.get("question")
         history = payload.get("history", [])
+        session_id = payload.get('conversation_id')
+        store = getattr(self, 'conversation_store', None)
         clean_history(history)  # Validate before touching hardware or contacting the model.
         if not isinstance(question, str) or not question.strip() or len(question) > 4000:
             raise ValueError("问题必须是 1～4000 字符的文字")
@@ -3925,18 +4329,36 @@ class RobotWebState:
                     break
         turn_graph = self.graph_snapshot()
         map_evidence = MapEvidence(turn_graph)
+        # Only this turn's verified exact-name lookup may supersede a broad
+        # category query; never infer uniqueness from an arbitrary chosen ID.
+        resolved_this_turn = set()
+        target_offer_this_turn = {}
+
+        def resolve_map_target(name):
+            result = map_evidence.resolve_target(name)
+            if result['unique']:
+                resolved_this_turn.update(result['target_ids'])
+            return result
 
         def get_skill_context(skill_id):
             result = skill_resources(skill_id, turn_graph, bool(reference), reference_source)
             result["snapshot"] = map_evidence.version
             return result
 
-        def scene_result(capture_id, path, question, fresh):
+        new_scene_this_turn = None
+
+        def scene_result(capture_id, path, scene_question, fresh):
+            source_note = ("这是本轮原地新拍摄的画面；历史对话中的观察不能作为本图事实。" if fresh
+                           else "这是历史照片，只能回答拍摄时可见内容，不能证明当前现场或当前位置。")
+            visual_question = (source_note + "\n本轮用户完整需求：" + question
+                               + "\n本次图片分析问题：" + scene_question)
             try:
-                observation = self.agent_vision(path, question, history)
+                observation = self.agent_vision(path, visual_question, history)
             except Exception as exc:
                 LOGGER.warning("[vision] scene analysis failed type=%s", type(exc).__name__)
                 raise ToolInputError("照片已采集，但本次视觉分析失败，请检查模型连接后重试。") from exc
+            if fresh and getattr(self, 'media_archive', None):
+                self.media_archive.record(f'/captures/{capture_id}.jpg', observation=observation)
             return {"ok": True, "capture_id": capture_id, "image_url": f"/captures/{capture_id}.jpg",
                     "image_source": "现场拍摄" if fresh else "历史照片（不是实时画面）",
                     "source_type": "scene_photo", "captured_this_turn": fresh,
@@ -3947,17 +4369,21 @@ class RobotWebState:
             if not previous_capture or not self.capture_path(previous_capture).exists():
                 return {"ok": False, "error": "本会话的历史照片不存在或已过期，没有重新拍照。"}
             path = self.capture_path(previous_capture)
-            memory["last_scene"] = {"capture_id": previous_capture, "observed_at": path.stat().st_mtime}
+            if new_scene_this_turn is None:
+                memory["last_scene"] = {**(memory.get('last_scene') or {}), "capture_id": previous_capture, "observed_at": path.stat().st_mtime}
             return scene_result(previous_capture, path, question, False)
 
         def observe_scene(question):
-            nonlocal previous_capture
+            nonlocal new_scene_this_turn
             if self.tasks.is_busy() or self.mapping.is_busy():
                 return {"ok": False, "error": "机器人正在执行任务，请查询任务状态或停止任务后再拍照。"}
-            capture_id, path = self.capture()
-            previous_capture = capture_id
+            if getattr(self, 'media_archive', None) and session_id and payload.get('user_message_id'):
+                capture_id, path = self.capture(media_scope={'conversation_id':session_id,'turn_id':payload['user_message_id']},
+                                                metadata={'question':question})
+            else:
+                capture_id, path = self.capture()
+            new_scene_this_turn = capture_id
             memory["last_scene"] = {"capture_id": capture_id, "observed_at": path.stat().st_mtime}
-            tools["inspect_previous_scene"] = history_tool
             return scene_result(capture_id, path, question, True)
 
         def inspect_reference(question):
@@ -3973,9 +4399,25 @@ class RobotWebState:
                                 ("空间拟物体数量", "语义图谱规模", "空间对象识别指标")]}
 
         def get_robot_status():
-            task = self.tasks.snapshot()
-            fields = ("id", "instruction", "status", "current_step", "error", "result_text", "observations", "skill")
+            task = self.conversation_task(session_id) if store else self.tasks.snapshot()
+            fields = ("id", "instruction", "status", "current_step", "error", "result_text", "observations", "skill", "started_at", "finished_at")
             robot = self.tasks.robot_status()
+            # Geometry is evidence, not an intent router or an automatic movement decision.
+            scene = memory.get('last_scene') or {}
+            target = map_evidence.objects.get(str(scene.get('target_ann_id'))) or {}
+            location_evidence = {'source_type': 'live_pose_compared_with_saved_map',
+                                 'target_ann_id': scene.get('target_ann_id'), 'distance_m': None,
+                                 'note': '历史到达记录不是当前位置；距离只表示当前定位与地图目标的距离，不证明目标可见。'}
+            xy = target.get('nav_xy') or target.get('floor_xy')
+            pose = robot.get('pose') or {}
+            if robot.get('online') and xy and len(xy) >= 2:
+                try:
+                    distance = math.hypot(float(pose['x'])-float(xy[0]), float(pose['y'])-float(xy[1]))
+                    if math.isfinite(distance):
+                        location_evidence['distance_m'] = round(distance, 2)
+                        location_evidence['target_map_xy'] = xy[:2]
+                except (KeyError, TypeError, ValueError):
+                    pass
             task_data = {k: task[k] for k in fields if k in task} if task else None
             if task_data and isinstance(task_data.get("observations"), list):
                 task_data["observations"] = task_data["observations"][-4:]
@@ -3984,7 +4426,10 @@ class RobotWebState:
             return {"ok": True, "source_type": "robot_status", "observed_at": time.time(),
                     "robot": {k: v for k, v in robot.items() if k != "track"},
                     "task": task_data,
-                    "mapping_busy": self.mapping.is_busy()}
+                    "last_observed_target_location": location_evidence,
+                    "mapping_busy": self.mapping.is_busy(),
+                    "robot_has_pending_plan": bool((self.tasks.snapshot() or {}).get('status') in ('planned', 'needs_clarification')),
+                    "robot_busy": self.tasks.is_busy() if store else bool(task and task.get('status') in ('running','canceling'))}
 
         def plan_robot_skill(skill_id, **arguments):
             if MapEvidence(self.graph_snapshot()).version != map_evidence.version:
@@ -4000,20 +4445,25 @@ class RobotWebState:
                 candidates = [map_evidence.objects[key] for key in scope.get("ids", [])
                               if key in map_evidence.objects
                               and map_evidence.objects[key].get("category") == obj.get("category")]
-                if len(candidates) > 1 and not selected and scope.get("snapshot") == map_evidence.version:
+                if len(candidates) > 1 and not selected and str(target) not in resolved_this_turn and scope.get("snapshot") == map_evidence.version:
                     choices = [{k: obj.get(k) for k in ("ann_id", "category", "category_zh", "position", "floor_xy")}
                                for obj in candidates[:20]]
                     memory["target_offer"] = {"ids": [c["ann_id"] for c in choices], "snapshot": map_evidence.version}
-                    return {"ok": True, "clarification": "地图查询仍有多个同类目标，尚未创建移动任务。请从下方选择，或补充可区分的位置线索；不会擅自选择其中一个。",
-                            "target_choices": choices, "target_choice_snapshot": map_evidence.version,
-                            "pending_request": {"goal": arguments.get("instruction"), "status": "needs_clarification"}}
-            task = self.tasks.plan_skill(skill_id, reference=reference, **arguments)
+                    target_offer_this_turn.update(memory["target_offer"])
+                    return {"ok": False, "retry_after_lookup": True, "error": "此前查询范围包含多个同类目标，尚未创建任务。用户已给完整名称时先调用resolve_map_target核对，唯一匹配后再提交计划。只有名称仍不唯一或用户未明确目标时，才调用ask_user请用户选择。不要把历史宽泛范围当成本轮歧义。",
+                            "target_choices": choices, "target_choice_snapshot": map_evidence.version}
+            task = self.plan_for_conversation(session_id, lambda: self.tasks.plan_skill(skill_id, reference=reference, **arguments),
+                                              payload.get('user_message_id'))
             return {"ok": True, "task": task, "requires_confirmation": True}
 
         def ask_user(goal, question, skill_id, missing_inputs):
             # Validate declared missing resources; do not classify user wording.
             if skill_id != "none":
                 resources = get_skill_context(skill_id)
+                unsupported = sorted(set(missing_inputs) - set(resources["accepted_inputs"]))
+                if unsupported:
+                    return {"ok": False, "error": "这些不是该技能所需的输入，不能把可选线索当成必填条件。依据技能契约重新判断；资源满足时生成待确认计划。确有指代或用户偏好歧义可用空missing_inputs说明，不自动执行。",
+                            "unsupported_missing_inputs": unsupported, "resources": resources}
                 available = set(resources["default_arguments"])
                 if reference_source == "current_turn" and reference:
                     available.add("reference")
@@ -4022,13 +4472,20 @@ class RobotWebState:
                             "resources": resources}
             elif "reference" in missing_inputs and reference_source == "current_turn" and reference:
                 return {"ok": False, "error": "本轮参考图已上传成功，不需要重新上传；可查看参考图或继续规划。"}
-            return {"ok": True, "clarification": question, "pending_request": {
+            result = {"ok": True, "clarification": question, "pending_request": {
                 "goal": goal, "clarification": question, "status": "needs_clarification"}}
+            offer = target_offer_this_turn
+            if offer.get('snapshot') == map_evidence.version and skill_id != 'none':
+                result['target_choices'] = [{k:map_evidence.objects[str(key)].get(k)
+                    for k in ('ann_id','category','category_zh','position','floor_xy')}
+                    for key in offer.get('ids', []) if str(key) in map_evidence.objects]
+                result['target_choice_snapshot'] = map_evidence.version
+            return result
 
         text_arg = {"type": "string"}
         catalog = map_evidence.category_catalog()
-        history_tool = Tool("分析本会话最近一张历史现场照片，不启动相机、不代表实时画面。", {"question": text_arg},
-                            inspect_previous_scene, "正在查看之前的照片", "历史照片分析")
+        history_tool = Tool("分析本轮开始前本会话最近一张历史现场照片；即使本轮又拍了新照片，该工具仍分析旧图。不启动相机、不代表实时画面。", {"question": text_arg},
+                            inspect_previous_scene, "正在查看之前的照片", "历史照片分析", "historical_observe")
         category_arg = {"type": "array", "items": {"type": "string", "maxLength": 256}, "maxItems": 200,
             "description": "选择所有语义相关类别的原始 category 值组成字符串数组；全图传 [\"*\"]，*不能与具体类别混用；没有相关类别传 []。当前目录：" +
                 json.dumps(catalog["categories"], ensure_ascii=False)}
@@ -4037,14 +4494,19 @@ class RobotWebState:
         else:
             category_arg["description"] += "目录未完整，可用 list_map_categories 继续读取。"
         tools = {
+            "resolve_map_target": Tool("按用户给出的地点名称或别名查找，优先精确匹配，无精确结果时按名称包含查找。保留用户给出的完整名称；只有简称时也可查询。唯一结果可生成待确认计划，多结果需消歧。此工具不依赖room_name/room_type是否填写，不执行移动。", {
+                "name": {"type":"string","description":"本轮明确目标的完整名称，保留房间号、前门/后门等限定；不臆造。"}},
+                resolve_map_target, "正在核对目标名称", "目标名称核对"),
             "get_skill_context": Tool("准备技能或询问缺少资料前，读取技能所需的参考图状态及地图配置的默认点位。默认点来自当前地图而非固定编号；用户指定地点优先，多候选必须消歧。仅查询不执行。", {
                 "skill_id": {"type": "string", "enum": [s["id"] for s in skill_summary()]}},
                 get_skill_context, "正在核对任务所需资料和默认点位", "技能资源查询", "prepare"),
-            "observe_scene": Tool("拍摄并分析原地当前的新照片，不移动。仅用于用户需要现在的现场信息。", {"question": text_arg}, observe_scene, "正在查看当前画面", "现场观察", "observe"),
+            "observe_scene": Tool("拍摄并分析原地当前的新照片，不移动。用于明确请求查看当前现场，或本会话已有明确观察对象的实时追问。如果没有历史/参考图且所指对象不明，先用ask_user澄清，不能靠随意拍照猜测所指对象。历史照片的问题使用历史分析工具。", {"question": text_arg}, observe_scene, "正在查看当前画面", "现场观察", "observe"),
             "inspect_reference": Tool("查看用户上传的图片", {"question": text_arg}, inspect_reference, "正在查看上传的图片", "图片分析"),
             "query_map": Tool("查询已保存的环境记录/拟物体地图。按语义选择全部相关类别和筛选条件，工具一次返回完整计数、分类数量和位置；不需要提供对象 ID，不需再调用统计工具。", {
                 "question": {"type": "string", "description": "结合上下文还原的完整查询需求"},
                 "categories": category_arg, "filters": FILTER_SCHEMA,
+                "count_unit": {"type":"string","enum":["objects","rooms"],"default":"objects",
+                    "description":"问物体/门数量选objects；问多少间房间/工作室选rooms，按room_id去重，配合room_type或room_name筛选。"},
                 "offset": {"type": "integer", "minimum": 0, "maximum": 1000000, "default": 0}}, map_evidence.query, "正在查询地图", "地图查询"),
             "query_project_info": Tool("查阅项目历史验收指标，不是当前地图或实时状态", {}, query_project_info, "正在查阅项目资料", "项目资料"),
             "compare_map_positions": Tool("核对地图中参考物与候选物的距离。先查询双方真实 ID；用于旁边、附近等空间线索消歧，不能仅凭位置描述相似选目标。不自动导航。", {
@@ -4060,6 +4522,24 @@ class RobotWebState:
                     "description": "确实缺少的资源参数名，如reference、pickup_ann_id、return_ann_id。已有本轮参考图和唯一默认点不能称为缺失；用户偏好、目标歧义或明确另指定地点时用空数组，并在question说明真正需要确认的内容。"}}, ask_user, "有一处信息需要确认", "需求澄清"),
         }
         tools.update(skill_tools(plan_robot_skill))
+        if store:
+            tools['recall_conversation'] = Tool('检索本会话的历史对话、工具结果和任务经历，不访问其他会话。历史不是实时现场；可用返回的照片标识继续分析。', {
+                'query': {'type':'string','default':'','maxLength':200,'description':'查询词；空字符串读取最近记录'},
+                'offset': {'type':'integer','minimum':0,'maximum':1000000,'default':0}},
+                lambda query='', offset=0: store.recall(session_id, query, offset), '正在查阅本会话记忆', '会话记忆查询')
+            def inspect_memory_image(capture_id, question):
+                url = f'/captures/{capture_id}.jpg'
+                if not CAPTURE_ID_RE.fullmatch(capture_id) or not store.owns_media(session_id, url):
+                    raise ToolInputError('照片不属于当前会话，或标识无效')
+                path = self.capture_path(capture_id)
+                if not path.is_file():
+                    raise ToolInputError('历史照片已不可用，不能假装已查看；需要新照片时明确说明')
+                if new_scene_this_turn is None:
+                    memory['last_scene'] = {'capture_id': capture_id, 'observed_at': path.stat().st_mtime}
+                return scene_result(capture_id, path, question, False)
+            tools['inspect_memory_image'] = Tool('分析本会话历史任务/对话照片，不启动相机，不代表当前实时画面。照片标识从本会话记忆获得。', {
+                'capture_id': {'type':'string','maxLength':32}, 'question':text_arg},
+                inspect_memory_image, '正在分析本会话历史照片', '历史任务照片分析', 'historical_observe')
         if previous_capture:
             tools["inspect_previous_scene"] = history_tool
         if catalog["next_offset"] is not None:
@@ -4071,6 +4551,11 @@ class RobotWebState:
             # absent upload can answer questions about a saved environment.
             del tools["inspect_reference"]
         def remember(name, arguments, result):
+            if store:
+                # Avoid recursively embedding previously recalled records into new records.
+                saved_result = ({'record_sequences': [r['seq'] for r in result.get('items', [])]}
+                                if name == 'recall_conversation' else result)
+                store.event(session_id, 'tool_result', {'tool':name, 'arguments':arguments, 'result':saved_result})
             LOGGER.info("[agent-tool] tool=%s ok=%s task_id=%s task_status=%s",
                         name, result.get("ok", True), (result.get("task") or {}).get("id"),
                         (result.get("task") or {}).get("status"))
@@ -4085,7 +4570,7 @@ class RobotWebState:
             # Keep small, server-produced evidence, not copied client claims or a
             # second full map. Memory is historical, never a live sensor cache.
             keys = ("source", "source_type", "snapshot", "map_name", "capture_id", "image_source", "observed_at",
-                    "observation", "count", "groups", "selection", "count_scope", "missing_filter_fields")
+                    "observation", "count", "count_unit", "object_count", "rooms", "groups", "selection", "count_scope", "missing_filter_fields")
             evidence = {key: result[key] for key in keys if key in result}
             if name == "get_robot_status":
                 task = result.get("task") or {}
@@ -4098,8 +4583,10 @@ class RobotWebState:
 
         if self.mock:
             return {"text": "当前为模拟模式，没有连接模型或操作真实机器人。", "tool_trace": [], "target_ids": []}
+        from robot_memory import compact_record
         return AgentRunner(self.agent_complete, tools, native=True, require_final_tool=True,
-                           task_snapshot=self.tasks.snapshot).run(question, history, {
+                           require_scene_contract=True,
+                           task_snapshot=(lambda: self.conversation_task(session_id)) if store else self.tasks.snapshot).run(question, history, {
             "has_uploaded_image": reference_source == "current_turn", "has_reference_image": bool(reference),
             "reference_source": reference_source, "has_previous_scene_image": bool(previous_capture),
             "skills": skill_summary(),
@@ -4107,7 +4594,10 @@ class RobotWebState:
             "pending_request": memory.get("pending_request"), "focus": memory.get("focus"),
             "user_selected_target": memory.get("confirmed_target"),
             "planned_task_not_execution_proof": memory.get("planned_task"),
-            "previous_evidence_not_live": memory["evidence"],
+            "previous_evidence_not_live": [compact_record(item, 900) for item in memory["evidence"][-3:]],
+            "historical_dialogue_summary": memory.get('history_summary', []),
+            "task_experiences_not_live": memory.get('task_experiences', []),
+            "last_scene_not_live": memory.get('last_scene'),
         }, emit, record=remember)
 
     def route(self, question: str, history=None, has_reference=False) -> dict:
@@ -4304,6 +4794,56 @@ class RobotWebState:
         )
         return comparison
 
+    def _welcome_scene_presence(self, scene_path: Path) -> dict:
+        """Independent Qwen check of only the live scene, before reference comparison."""
+        from openai import OpenAI
+
+        base_url = os.getenv("JAKA_AGENT_BASE_URL", "").strip()
+        model = os.getenv("JAKA_AGENT_MODEL", "").strip()
+        if not base_url or not model:
+            raise RuntimeError("迎宾现场人物检测需要配置 Qwen 图像服务")
+        image_url = "data:image/jpeg;base64," + base64.b64encode(scene_path.read_bytes()).decode("ascii")
+        check_cancelled()
+        client = OpenAI(base_url=base_url, api_key=os.getenv("JAKA_AGENT_API_KEY", "EMPTY"))
+        response = client.with_options(timeout=35, max_retries=0).chat.completions.create(
+            model=model, temperature=0, max_tokens=180,
+            messages=[{"role": "user", "content": [
+                {"type": "image_url", "image_url": {"url": image_url}},
+                {"type": "text", "text": WELCOME_PRESENCE_PROMPT},
+            ]}],
+        )
+        check_cancelled()
+        raw = _json_text(response.choices[0].message.content)
+        result = _parse_welcome_presence_result(raw)
+        LOGGER.info("[welcome] scene-only person gate image=%s visible=%s count=%s evidence=%r raw=%r",
+                    scene_path, result["person_visible"], result["person_count"],
+                    result["visible_evidence"], raw[:500])
+        return result
+
+    def _retry_welcome_person_comparison(self, reference_path: Path, scene_path: Path) -> tuple[dict, str]:
+        """One independent two-image retry when MiniCPM returned an invalid schema."""
+        from openai import OpenAI
+
+        base_url = os.getenv("JAKA_AGENT_BASE_URL", "").strip()
+        model = os.getenv("JAKA_AGENT_MODEL", "").strip()
+        if not base_url or not model:
+            raise RuntimeError("迎宾复核需要配置 Qwen 图像服务")
+        def image_url(path):
+            return "data:image/jpeg;base64," + base64.b64encode(path.read_bytes()).decode("ascii")
+        check_cancelled()
+        client = OpenAI(base_url=base_url, api_key=os.getenv("JAKA_AGENT_API_KEY", "EMPTY"))
+        response = client.with_options(timeout=65, max_retries=0).chat.completions.create(
+            model=model, temperature=0, max_tokens=850,
+            messages=[{"role": "user", "content": [
+                {"type": "image_url", "image_url": {"url": image_url(reference_path)}},
+                {"type": "image_url", "image_url": {"url": image_url(scene_path)}},
+                {"type": "text", "text": WELCOME_RETRY_PROMPT},
+            ]}],
+        )
+        check_cancelled()
+        raw = _json_text(response.choices[0].message.content).strip()
+        return _parse_person_reference_result(raw), raw
+
     def compare_person_reference(self, reference: dict, scene_path: Path) -> dict:
         """以两张独立图片比对迎宾人物外观，不向模型提供地点或身份文字先验。"""
         if self.mock:
@@ -4322,6 +4862,14 @@ class RobotWebState:
             raise FileNotFoundError("迎宾现场抓拍图片不存在")
 
         with self.infer_lock:
+            presence = self._welcome_scene_presence(scene_path)
+            if not presence["person_visible"]:
+                return {
+                    "found": False, "candidate_visible": False, "confidence": "low",
+                    "score": 0.0, "schema_valid": presence["schema_valid"],
+                    "reason": "现场单图未确认有人，不进行身份比对。",
+                    "presence_gate": presence,
+                }
             from qwen_planner import BASE_URL, VISION_MODEL, _client, _image_data_url
 
             reference_url = _image_data_url(str(reference_path), VISION_MODEL)
@@ -4359,6 +4907,7 @@ class RobotWebState:
                 f"{reasoning_raw[:4000]}\n"
                 "<<<观察摘要结束>>>\n"
                 "请把它转换为以下扁平JSON结构。没有明确证据的项目必须填“无法核对”并设为unknown：\n"
+                "候选位置和参考图、现场各项描述必须填写摘要中的实际可见内容，不能复制下面的模板文字。\n"
                 f"{WELCOME_PERSON_JSON_SCHEMA}"
             )
             formatted_response = _client().chat.completions.create(
@@ -4372,6 +4921,25 @@ class RobotWebState:
             )
         raw = _json_text(formatted_response.choices[0].message.content).strip()
         comparison = _parse_person_reference_result(raw)
+        if not comparison.get("schema_valid"):
+            LOGGER.warning("[welcome] invalid MiniCPM comparison schema; retrying same two photos once scene=%s raw=%r",
+                           scene_path, raw[:1000])
+            try:
+                retry, retry_raw = self._retry_welcome_person_comparison(reference_path, scene_path)
+            except TaskCancelled:
+                raise
+            except Exception as exc:
+                LOGGER.warning("[welcome] Qwen comparison retry failed scene=%s error=%s", scene_path, exc)
+                retry, retry_raw = None, ""
+            if retry is not None:
+                LOGGER.info("[welcome] Qwen comparison retry scene=%s schema_valid=%s found=%s score=%.2f raw=%r",
+                            scene_path, retry.get("schema_valid"), retry.get("found"),
+                            float(retry.get("score") or 0), retry_raw[:1500])
+                if retry.get("schema_valid"):
+                    comparison = retry
+                    raw = retry_raw
+                    comparison["comparison_source"] = "qwen_retry"
+        comparison["presence_gate"] = presence
         comparison["reasoning_summary"] = reasoning_raw[:2000]
         LOGGER.info(
             "[vision] compare_person_reference response scene=%s found=%s confidence=%r "
@@ -4746,6 +5314,30 @@ class RobotWebHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         request_url = urlparse(self.path)
         path = request_url.path
+        if path == '/api/conversation/media':
+            query = parse_qs(request_url.query)
+            try:
+                cid = (query.get('id') or [''])[0]
+                turn_id = (query.get('turn_id') or [None])[0]
+                limit = int((query.get('limit') or ['200'])[0])
+                offset = int((query.get('offset') or ['0'])[0])
+                rows = self.state.media_archive.list(cid, turn_id, limit, offset)
+                self._send_json({'media':rows, 'limit':limit, 'offset':offset,
+                                 'next_offset':offset+len(rows) if len(rows)==limit else None})
+            except ValueError as exc:
+                self._error(exc, HTTPStatus.BAD_REQUEST)
+            return
+        if path in ('/api/conversations', '/api/conversation'):
+            try:
+                store = self.state.conversation_store
+                if path == '/api/conversations':
+                    self._send_json({'conversations':store.list()})
+                else:
+                    cid = (parse_qs(request_url.query).get('id') or [''])[0]
+                    self._send_json({'conversation':store.conversation(cid)})
+            except ValueError as exc:
+                self._error(exc, HTTPStatus.NOT_FOUND)
+            return
         if path == "/":
             self._send_bytes(_document(), "text/html; charset=utf-8")
             return
@@ -4791,16 +5383,22 @@ class RobotWebHandler(BaseHTTPRequestHandler):
                 self._error(exc, HTTPStatus.NOT_FOUND)
             return
         if path == "/api/robot/status":
+            cid = (parse_qs(request_url.query).get('conversation_id') or [None])[0]
             self._send_json({
                 "robot": self.state.tasks.robot_status(),
-                "task": self.state.tasks.snapshot(),
+                "task": self.state.conversation_task(cid) if getattr(self.state,'conversation_store',None) else self.state.tasks.snapshot(),
+                "robot_busy": self.state.tasks.is_busy(),
             })
             return
         if path == "/api/tracks":
             self._send_json(self.state.tasks.tracks_snapshot())
             return
         if path == "/api/task/status":
-            self._send_json({"task": self.state.tasks.snapshot()})
+            cid = (parse_qs(request_url.query).get('conversation_id') or [None])[0]
+            task = self.state.tasks.snapshot()
+            self._send_json({"task": self.state.conversation_task(cid) if getattr(self.state,'conversation_store',None) else task,
+                             "busy": self.state.tasks.is_busy(),
+                             "pending": bool(task and task.get('status') in ('planned','needs_clarification'))})
             return
         if path == "/api/mapping/sessions":
             self._send_json(self.state.mapping.sessions_snapshot())
@@ -4847,7 +5445,8 @@ class RobotWebHandler(BaseHTTPRequestHandler):
         video_match = re.fullmatch(r"/videos/([0-9a-f]{32})\.(mp4|avi)", path)
         if video_match:
             video_id, suffix = video_match.groups()
-            video_path = VIDEO_DIR / f"{video_id}.{suffix}"
+            archive = getattr(self.state, 'media_archive', None)
+            video_path = archive.resolve(path) if archive else VIDEO_DIR / f"{video_id}.{suffix}"
             if not video_path.exists():
                 self._error("视频不存在", HTTPStatus.NOT_FOUND)
                 return
@@ -4869,6 +5468,27 @@ class RobotWebHandler(BaseHTTPRequestHandler):
             return
         self._error("接口不存在", HTTPStatus.NOT_FOUND)
 
+    def _conversation_plan(self, payload, callback):
+        store = getattr(self.state, 'conversation_store', None)
+        if not store:
+            return callback()
+        cid = payload.get('conversation_id')
+        user_id = payload.get('user_message_id') or uuid.uuid4().hex
+        assistant_id = payload.get('assistant_message_id') or uuid.uuid4().hex
+        store.validate_turn_ids(cid, user_id, assistant_id)
+        reference = payload.get('reference') or {}
+        if not isinstance(reference, dict) or (reference and not store.owns_media(cid, reference.get('image_url', ''))):
+            raise ValueError('参考图片未绑定当前会话，请重新上传')
+        task = self.state.plan_for_conversation(cid, callback, user_id)
+        now = time.time()*1000
+        store.message(cid, {'id': user_id,
+                           'role':'user','text':payload.get('instruction',''), 'createdAt':now,
+                           'referenceStoredImage':(payload.get('reference') or {}).get('image_url','')})
+        store.message(cid, {'id':assistant_id,
+                           'role':'assistant','text':'任务计划已生成，请检查任务卡并确认后执行。',
+                           'state':'done','createdAt':now+1,'taskId':task['id'],'task':task})
+        return task
+
     def do_POST(self):
         request_url = urlparse(self.path)
         path = request_url.path
@@ -4879,10 +5499,46 @@ class RobotWebHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/reference/upload" and self.headers.get("Content-Type", "").lower().startswith("image/"):
                 name = (parse_qs(request_url.query).get("name") or [""])[0]
+                if getattr(self.state, 'conversation_store', None):
+                    cid = (parse_qs(request_url.query).get('conversation_id') or [''])[0]
+                    self.state.conversation_store.conversation(cid)
                 image_bytes = self._read_reference_image()
-                self._send_json(self.state.save_reference_upload(name, image_bytes))
+                if getattr(self.state, 'media_archive', None):
+                    turn_id = (parse_qs(request_url.query).get('turn_id') or [uuid.uuid4().hex])[0]
+                    result = self.state.save_reference_upload(name, image_bytes,
+                        media_scope={'conversation_id':cid,'turn_id':turn_id})
+                else:
+                    result = self.state.save_reference_upload(name, image_bytes)
+                if getattr(self.state, 'conversation_store', None):
+                    cid = (parse_qs(request_url.query).get('conversation_id') or [''])[0]
+                    self.state.conversation_store.event(cid, 'reference_upload', result)
+                self._send_json(result)
                 return
             payload = self._read_json()
+            if path in ('/api/conversation/create','/api/conversation/import','/api/conversation/delete'):
+                store = self.state.conversation_store
+                managing_delete = path.endswith('/delete')
+                if managing_delete and not self.state.agent_lock.acquire(blocking=False):
+                    raise ValueError('对话正在处理，请稍后再管理会话')
+                try:
+                    if path.endswith('/create'):
+                        result = store.create(payload.get('id'), payload.get('title','新对话'))
+                    elif path.endswith('/import'):
+                        store.import_legacy(payload)
+                        result = None
+                    else:
+                        with self.state.tasks.lock:
+                            live_task = self.state.tasks.snapshot() or {}
+                            if live_task.get('conversation_id') == payload.get('id') and self.state.tasks.is_busy():
+                                raise ValueError('任务仍在运行或清理资源，请稍后再删除会话')
+                            store.delete(payload.get('id'))
+                        self.state.agent_sessions.pop(payload.get('id'), None)
+                        result = None
+                    self._send_json({'ok':True,'conversation':result})
+                finally:
+                    if managing_delete:
+                        self.state.agent_lock.release()
+                return
             if path == "/api/agent/chat":
                 if not isinstance(payload, dict):
                     raise ValueError("请求体必须是对象")
@@ -4899,9 +5555,17 @@ class RobotWebHandler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.close_connection = True
 
+                disconnected = False
                 def emit(event):
-                    self.wfile.write((json.dumps(event, ensure_ascii=False) + "\n").encode("utf-8"))
-                    self.wfile.flush()
+                    nonlocal disconnected
+                    if disconnected:
+                        return
+                    try:
+                        self.wfile.write((json.dumps(event, ensure_ascii=False) + "\n").encode("utf-8"))
+                        self.wfile.flush()
+                    except (BrokenPipeError, ConnectionResetError):
+                        # Closing a browser does not discard the originating conversation's result.
+                        disconnected = True
 
                 try:
                     result = self.state.agent_chat(payload, emit)
@@ -4951,7 +5615,16 @@ class RobotWebHandler(BaseHTTPRequestHandler):
                 encoded = str(payload.get("image_base64") or "")
                 if not name or not encoded:
                     raise ValueError("请提供参考图片文件名和内容")
-                self._send_json(self.state.save_reference_image(name, encoded))
+                if getattr(self.state, 'conversation_store', None):
+                    self.state.conversation_store.conversation(payload.get('conversation_id'))
+                if getattr(self.state, 'media_archive', None):
+                    result = self.state.save_reference_image(name, encoded, media_scope={
+                        'conversation_id':payload.get('conversation_id'), 'turn_id':payload.get('turn_id') or uuid.uuid4().hex})
+                else:
+                    result = self.state.save_reference_image(name, encoded)
+                if getattr(self.state, 'conversation_store', None):
+                    self.state.conversation_store.event(payload.get('conversation_id'), 'reference_upload', result)
+                self._send_json(result)
                 return
             if path == "/api/map/select":
                 graph = self.state.select_map(str(payload.get("name") or ""))
@@ -4988,7 +5661,17 @@ class RobotWebHandler(BaseHTTPRequestHandler):
                 instruction = str(payload.get("instruction") or "").strip()
                 if not instruction:
                     raise ValueError("任务指令不能为空")
-                self._send_json({"task": self.state.tasks.plan(instruction)})
+                self._send_json({"task": self._conversation_plan(payload, lambda: self.state.tasks.plan(instruction))})
+                return
+            if path == "/api/task/patrol/plan":
+                instruction = str(payload.get("instruction") or "").strip()
+                snapshot = payload.get("map_snapshot")
+                if not instruction or not isinstance(snapshot, str) or not snapshot:
+                    raise ValueError("请先加载地图并选择巡逻地点")
+                self._send_json({"task": self._conversation_plan(payload, lambda: self.state.tasks.plan_skill(
+                    "patrol", instruction, target_ann_ids=payload.get("target_ann_ids"),
+                    rounds=payload.get("rounds", -1), expected_map_snapshot=snapshot,
+                ))})
                 return
             if path == "/api/task/find-object/plan":
                 instruction = str(payload.get("instruction") or "").strip()
@@ -5012,7 +5695,7 @@ class RobotWebHandler(BaseHTTPRequestHandler):
                     "content_type": content_type,
                     "image_url": expected_url,
                 }
-                self._send_json({"task": self.state.tasks.plan_skill("find_object", instruction, reference=safe_reference)})
+                self._send_json({"task": self._conversation_plan(payload, lambda: self.state.tasks.plan_skill("find_object", instruction, reference=safe_reference))})
                 return
             if path == "/api/task/welcome/plan":
                 instruction = str(payload.get("instruction") or "").strip()
@@ -5045,20 +5728,35 @@ class RobotWebHandler(BaseHTTPRequestHandler):
                     "image_url": expected_url,
                 }
                 self._send_json({
-                    "task": self.state.tasks.plan_skill(
+                    "task": self._conversation_plan(payload, lambda: self.state.tasks.plan_skill(
                         "welcome", instruction,
                         reference=safe_reference,
                         pickup_ann_id=pickup_ann_id,
                         return_ann_id=return_ann_id,
-                    )
+                    ))
                 })
                 return
             if path == "/api/task/execute":
                 task_id = str(payload.get("task_id") or "")
+                if getattr(self.state, 'conversation_store', None):
+                    self.state.require_task_owner(task_id, payload.get('conversation_id'))
+                    self.state.conversation_store.event(payload.get('conversation_id'), 'user_confirmed_task', {'task_id':task_id})
                 self._send_json({"task": self.state.tasks.execute(task_id)})
+                return
+            if path == "/api/task/welcome-confirm":
+                task_id = str(payload.get("task_id") or "")
+                if getattr(self.state, 'conversation_store', None):
+                    self.state.require_task_owner(task_id, payload.get('conversation_id'))
+                self._send_json({"task": self.state.tasks.confirm_welcome_guest(
+                    task_id, payload.get("confirmation_id"), payload.get("accepted"),
+                    payload.get("conversation_id"),
+                )})
                 return
             if path == "/api/task/cancel":
                 task_id = str(payload.get("task_id") or "")
+                if getattr(self.state, 'conversation_store', None):
+                    self.state.require_task_owner(task_id, payload.get('conversation_id'))
+                    self.state.conversation_store.event(payload.get('conversation_id'), 'user_canceled_task', {'task_id':task_id})
                 self._send_json({"task": self.state.tasks.cancel(task_id)})
                 return
             if path == "/api/mapping/plan":

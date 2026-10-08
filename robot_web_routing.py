@@ -190,61 +190,30 @@ def _normalize_confidence(value, default: str = "low") -> str:
 
 
 def _parse_find_object_result(raw: str) -> dict:
-    """解析双图结果；格式异常时安全降级为低置信度未命中，不中止整条寻物任务。"""
+    """以明确的 found 布尔值为结论；置信度只记录，格式错误不冒充未找到。"""
     text = _json_text(raw).strip()
     value = _parse_model_json_object(text)
 
     if value is None:
-        # 本地视觉服务偶尔会只返回自然语言；这里做保守兜底解析，避免“模型说 high 但系统固定 low”。
-        explicit_found = re.search(
-            r'["\']?(?:found|match|is_same)["\']?\s*[:：=]+\s*(true|false)',
-            text,
-            flags=re.IGNORECASE,
+        # MiniCPM 偶尔把候选位置的逗号写进引号里，漏掉字段分隔符：
+        # "candidate_region":"整个场景," "confidence":... → "整个场景", "confidence":...
+        # 仅在已知字段交界处修复，不从自然语言或破损 JSON 中猜测 found。
+        repaired = re.sub(
+            r'("confidence"\s*:\s*)(high|medium|low)(\s*[,}])',
+            r'\1"\2"\3', text,
         )
-        negative = bool(re.search(
-            r"没有|未找到|不存在|无法确认|看不出|不确定|不是|并非|无相同|"
-            r"未发现|未出现|没有出现|无关|不同|不匹配",
-            text,
-        ))
-        positive = bool(re.search(r"找到|发现|存在|是同一|同一个|相同物理物品|匹配|基本一致|高度一致|可确认|确认存在", text))
-        found = (
-            explicit_found.group(1).lower() == "true"
-            if explicit_found
-            else positive and not negative
+        repaired = re.sub(
+            r'("(?:candidate_region|reason)"\s*:\s*"[^"\n]*?),"(\s+"(?:confidence|reason|candidate_visible|found)"\s*:)',
+            r'\1",\2', repaired,
         )
-
-        confidence = "low"
-        if found:
-            if re.search(r"confidence\s*[:：=]*\s*high|置信度\s*[:：=]*\s*(?:high|高)|高置信|高度一致|可确认|确认存在|基本一致", text, flags=re.IGNORECASE):
-                confidence = "high"
-            elif re.search(r"confidence\s*[:：=]*\s*medium|置信度\s*[:：=]*\s*(?:medium|中|中等)|疑似|可能|较像|相似", text, flags=re.IGNORECASE):
-                confidence = "medium"
-
-        if found and confidence == "high":
-            reason = "现场画面中发现与参考物品高度一致的目标。"
-        elif found:
-            reason = "现场画面中发现疑似目标，但还不能高置信确认。"
-        else:
-            reason = "现场画面中未发现与参考外观匹配的目标。"
-        LOGGER.warning(
-            "[vision] find_object returned non-JSON; fallback found=%s confidence=%s raw=%r",
-            found,
-            confidence,
-            text[:2000],
-        )
-        return {
-            "found": found,
-            "candidate_visible": found,
-            "candidate_region": "",
-            "confidence": confidence,
-            "reason": reason,
-        }
-
-    found_value = value.get("found", value.get("match", value.get("is_same")))
-    if isinstance(found_value, str):
-        found_value = found_value.strip().lower() in {"true", "1", "yes", "是", "找到", "发现"}
-    if not isinstance(found_value, bool):
-        found_value = False
+        value = _parse_model_json_object(repaired)
+    if value is None:
+        LOGGER.warning("[vision] invalid find_object result: malformed JSON raw=%r", text[:2000])
+        raise ValueError("寻物识别结果格式异常：模型输出不是可解析的 JSON，无法判断是否找到")
+    if type(value.get("found")) is not bool:
+        LOGGER.warning("[vision] invalid find_object result: missing boolean found raw=%r", text[:2000])
+        raise ValueError("寻物识别结果格式异常：缺少有效的 found 布尔值，无法判断是否找到")
+    found_value = value["found"]
     candidate_raw = value.get("candidate_visible")
     candidate_region = str(
         value.get("candidate_region")
@@ -274,15 +243,11 @@ def _parse_find_object_result(raw: str) -> dict:
                 if location_match else candidate_raw.strip()
             )
             candidate_visible = bool(found_value)
-    if candidate_visible is False:
-        found_value = False
     confidence = _normalize_confidence(value.get("confidence"), default="low")
     reason = str(value.get("reason") or "").strip()
     if re.search(r"上半部分|下半部分|上下两部分|第一张|第二张|图片1|图片2|参考图|现场图", reason):
-        if found_value and confidence == "high":
-            reason = "现场画面中发现与参考物品高度一致的目标。"
-        elif found_value:
-            reason = "现场画面中发现疑似目标，但还不能高置信确认。"
+        if found_value:
+            reason = "现场画面中发现与参考物品外观一致的目标。"
         else:
             reason = "现场画面中未发现与参考外观匹配的目标。"
     return {
@@ -290,6 +255,7 @@ def _parse_find_object_result(raw: str) -> dict:
         "candidate_visible": candidate_visible,
         "candidate_region": candidate_region[:300],
         "confidence": confidence,
+        "confidence_raw": value.get("confidence"),
         "reason": reason,
     }
 

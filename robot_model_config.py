@@ -11,7 +11,7 @@ from urllib.parse import urlsplit
 
 ALLOWED = {
     "JAKA_AGENT_BASE_URL", "JAKA_AGENT_MODEL", "DASHSCOPE_BASE_URL",
-    "QWEN_PLAN_MODEL", "QWEN_VISION_MODEL",
+    "QWEN_PLAN_MODEL", "QWEN_VISION_MODEL", "JAKA_AGENT_PROTOCOL",
 }
 
 
@@ -30,6 +30,8 @@ def load_model_config(path=None):
     for key, value in effective.items():
         if not value:
             raise ValueError("模型配置值不能为空: " + key)
+        if key == "JAKA_AGENT_PROTOCOL" and value not in ("native", "json"):
+            raise ValueError("Agent 协议必须为 native 或 json")
         if key.endswith("BASE_URL"):
             url = urlsplit(value)
             if (url.scheme not in ("http", "https") or not url.hostname

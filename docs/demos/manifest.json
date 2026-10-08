@@ -1,0 +1,38 @@
+{
+  "format": "H.264 MP4",
+  "editing": "Full-length transcoded copies; no cuts or speed changes",
+  "files": [
+    {
+      "file": "DEMO-1-1.mp4",
+      "original_bytes": 91214965,
+      "published_bytes": 11068348,
+      "duration_seconds": 90.0,
+      "audio_preserved": true,
+      "sha256": "87d4eec63ef58deedd2094151e02f345380dfcff4cfbae9239236b3a4a80c222"
+    },
+    {
+      "file": "DEMO-1-2.mp4",
+      "original_bytes": 36498695,
+      "published_bytes": 17744829,
+      "duration_seconds": 90.0,
+      "audio_preserved": true,
+      "sha256": "13d910b8a3bb44b68bf0b8205b98de29c58dffa26911bfed3f175ef49688ed5e"
+    },
+    {
+      "file": "DEMO-2-1.mp4",
+      "original_bytes": 17715872,
+      "published_bytes": 10825662,
+      "duration_seconds": 88.0,
+      "audio_preserved": true,
+      "sha256": "081a4a5e44b38b27cae9a414c6ddfb611da87b59f8e12f81f3383cbd5ee415b5"
+    },
+    {
+      "file": "DEMO-2-2.mp4",
+      "original_bytes": 44662592,
+      "published_bytes": 17941180,
+      "duration_seconds": 88.0,
+      "audio_preserved": true,
+      "sha256": "92e96d7c6cf22def54e71a1bcc1e6f5bb4847de79e20e2276159b1f41a9c0137"
+    }
+  ]
+}

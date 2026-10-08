@@ -10,9 +10,9 @@ import math
 from robot_agent import ToolInputError
 
 
-FILTER_FIELDS = ("category", "category_zh", "position", "func_desc")
+FILTER_FIELDS = ("category", "category_zh", "semantic_name", "room_id", "room_name", "room_type", "position", "func_desc")
 FILTER_SCHEMA = {"type": "array", "maxItems": 8, "default": [],
-    "description": "可选属性条件数组，无需条件则省略或 []。每项含 field（category/category_zh/position/func_desc）、operator（contains/equals）、value（字面文字）。多个条件同时满足。",
+    "description": "属性条件数组。field可选category/category_zh/semantic_name/room_id/room_name/room_type/position/func_desc，operator为contains/equals，value为字面文字。多个条件同时满足。按房间类型查询可选categories=['*']和room_type条件，不用办公室门类别代替房间用途。",
     "items": {
     "type": "object", "properties": {
         "field": {"type": "string", "enum": list(FILTER_FIELDS)},
@@ -39,7 +39,8 @@ class MapEvidence:
             self.objects[key] = obj
             category = str(obj.get("category") or obj.get("category_zh") or "未知类别")
             self.by_category.setdefault(category, []).append(key)
-            self.labels[category] = str(obj.get("category_zh") or category)
+            # An individual name (e.g. a room entrance) is NOT a class label.
+            self.labels[category] = str(obj.get("category_label_zh") or category)
         encoded = json.dumps(self.objects, ensure_ascii=False, sort_keys=True)
         self.version = hashlib.sha256(encoded.encode()).hexdigest()[:16]
 
@@ -50,7 +51,9 @@ class MapEvidence:
 
     def category_catalog(self, offset=0, limit=80):
         categories = list(self.by_category)
-        return {"categories": [{"category": name, "label": self.labels[name]} for name in categories[offset:offset + limit]],
+        return {"categories": [{"category": name, "label": self.labels[name],
+                                "example_names": list(dict.fromkeys(str(self.objects[key].get("semantic_name") or self.objects[key].get("category_zh") or name)
+                                    for key in self.by_category[name]))[:12]} for name in categories[offset:offset + limit]],
                 "total_categories": len(categories),
                 "next_offset": offset + limit if offset + limit < len(categories) else None}
 
@@ -83,7 +86,30 @@ class MapEvidence:
                 "candidates": sorted(candidates, key=lambda row: row["center_distance_m"]),
                 "meaning": "同一保存地图坐标系内的平面中心直线距离（米），不是可行走路径；最近不等于相邻，不证明实时位置。不自动选择目标；若都很远、坐标系不一致或线索矛盾，应澄清。"}
 
-    def query(self, question, categories, filters=None, offset=0):
+    def resolve_target(self, name):
+        """Name evidence only: exact first, then literal containment; never choose among matches."""
+        wanted = name.strip().casefold()
+        if not wanted:
+            raise ToolInputError("地点名称不能为空")
+        def names(obj):
+            return {
+            str(v).strip().casefold() for v in [obj.get('semantic_name'), obj.get('category_zh'),
+                *(obj.get('aliases') or [])] if isinstance(v, str) and v.strip()}
+        matches = [obj for obj in self.objects.values() if wanted in names(obj)]
+        match_type = 'exact'
+        if not matches:
+            matches = [obj for obj in self.objects.values() if any(wanted in value for value in names(obj))]
+            match_type = 'contains'
+        return {"ok": True, **self.metadata(), "requested_name": name,
+                "match_type": match_type,
+                "count": len(matches), "unique": len(matches) == 1,
+                "target_ids": [str(o['ann_id']) for o in matches],
+                "objects": [{k:o.get(k) for k in ('ann_id','category','category_zh','semantic_name','room_id','floor_xy')} for o in matches],
+                "note": "优先精确名称/别名匹配，无精确匹配才按名称包含查询；唯一时可用该ann_id规划，不自动执行。多匹配继续消歧，不能擅选。不是实时观察。"}
+
+    def query(self, question, categories, filters=None, offset=0, count_unit="objects"):
+        if count_unit not in ('objects', 'rooms'):
+            raise ToolInputError('count_unit必须是objects或rooms')
         selected = list(dict.fromkeys(categories))
         if "*" in selected:
             if len(selected) != 1:
@@ -115,7 +141,7 @@ class MapEvidence:
         if type(offset) is not int or not 0 <= offset <= len(ids):
             raise ToolInputError("详情页偏移超出查询结果范围")
         counts = Counter(str(self.objects[key].get("category") or self.objects[key].get("category_zh") or "未知类别") for key in ids)
-        fields = ("ann_id", "category", "category_zh", "position", "func_desc", "floor_xy", "nav_xy")
+        fields = ("ann_id", "category", "category_zh", "semantic_name", "room_id", "room_name", "room_type", "position", "func_desc", "floor_xy", "nav_xy")
         details, used = [], 0
         for key in ids[offset:offset + 20]:
             row = {field: (value[:300] if isinstance(value, str) else value)
@@ -135,14 +161,37 @@ class MapEvidence:
                                           "center_distance_m": pair["candidates"][0]["center_distance_m"]})
                     except (ToolInputError, ValueError, TypeError):
                         pass
+        rooms = {}
+        for key in ids:
+            obj = self.objects[key]
+            if obj.get('room_id'):
+                room = rooms.setdefault(str(obj['room_id']), {'room_id':str(obj['room_id']),
+                    'room_name':obj.get('room_name'), 'room_type':obj.get('room_type'), 'entrance_ann_ids':[]})
+                room['entrance_ann_ids'].append(obj['ann_id'])
+        # Keep strict filter/count semantics. Offer separate name evidence when
+        # metadata is absent, rather than silently widening the counted set.
+        suggestions = []
+        if not ids:
+            for rule in filters:
+                if rule['field'] in ('room_name', 'room_type', 'semantic_name', 'category_zh'):
+                    lookup = self.resolve_target(rule['value'])
+                    if lookup['count']:
+                        suggestions.append({k: lookup[k] for k in
+                            ('requested_name', 'match_type', 'count', 'target_ids', 'objects')})
         return {"ok": True, **self.metadata(), "question": question,
+                "name_lookup_suggestions": suggestions,
+                "absence_not_established": bool(missing_fields or suggestions),
+                "query_note": "question是需求说明，不执行自然语言搜索；筛选只由categories/filters决定。零条仅表示此筛选无匹配，缺字段不能证明地图没有目标。名称候选单独列出，不计入当前筛选结果。",
                 "selection": {"categories": selected, "filters": filters},
-                "count": len(ids), "groups": [{"category": name, "label": self.labels[name], "count": count}
+                "count": len(rooms) if count_unit == 'rooms' else len(ids), "count_unit":count_unit,
+                "object_count":len(ids), "rooms":list(rooms.values())[:100], "rooms_truncated":len(rooms)>100,
+                "objects_without_room_metadata":sum(not self.objects[key].get('room_id') for key in ids),
+                "groups": [{"category": name, "label": self.labels[name], "count": count}
                                               for name, count in counts.items()],
                 "target_ids": ids[:500], "highlight_truncated": len(ids) > 500,
                 "objects": details, "offset": offset,
                 "spatial_relations": relations,
                 "spatial_note": "小结果集附中心直线距离；不是导航路径，也不自动证明相邻。更多对象请调用 compare_map_positions。",
                 "next_offset": offset + len(details) if offset + len(details) < len(ids) else None,
-                "count_scope": "所选类别及条件下的全部地图记录，数量不受详情分页影响；不代表实时现场或未记录区域。",
+                "count_scope": ("按明确room_id去重的已标注房间数；前后门不重复计数，未标注房间不推测。" if count_unit == 'rooms' else "所选类别及条件下的全部物体记录数，不是房间数。") + "数量不受详情分页影响；不代表实时现场或未记录区域。",
                 "missing_filter_fields": sorted(missing_fields)}

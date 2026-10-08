@@ -1,5 +1,5 @@
 {
-  "frame": "robot_map",
+  "video_id": "b575edf7497347ac919871fd52a87504",
   "objects": [
     {
       "ann_id": 1,
@@ -366,6 +366,8 @@
       "marker": null
     }
   ],
-  "func_relationships": [],
-  "pos_relationships": []
+  "relationships": {
+    "functional": [],
+    "positional": []
+  }
 }
