@@ -7,13 +7,13 @@
 验证环境为 Python 3.13。先安装开发依赖，并将 Node.js 加入 PATH：
 
 ```bash
-python -m pip install -r requirements-dev.txt
+python -m pip install -e ".[dev]"
 python tools/run_offline_checks.py --require-node
 ```
 
-也可通过 `--node /path/to/node` 指定 Node.js。未使用 `--require-node` 时，缺少 Node.js 会明确跳过前端检查；CI 要求两部分都通过。日志和 JSON 结果位于 `test/artifacts/offline-checks/`，不纳入 Git。
+也可通过 `--node /path/to/node` 指定 Node.js。未使用 `--require-node` 时，缺少 Node.js 会明确跳过前端检查；CI 要求两部分都通过。日志和 JSON 结果位于 `tests/artifacts/offline-checks/`，不纳入 Git。
 
-当前公开测试集包含 **332 项 Python 测试与 4 组前端检查**：329 项 Python 测试通过，3 项服务器协调器集成检查因缺少可选的服务器存档夹具而跳过；4 组前端检查通过。存档路径为本地 `.codex-tmp/map-update-evidence/`，不纳入公开仓库。
+当前公开测试集包含 **339 项 Python 测试与 4 组前端检查**：336 项 Python 测试通过，3 项服务器协调器集成检查因缺少可选的服务器存档夹具而跳过；4 组前端检查通过。存档路径为本地 `.codex-tmp/map-update-evidence/`，不纳入公开仓库。
 
 入口会去除因跨模块导入造成的重复测试，并在 Python 测试期间阻止非回环网络连接。测试使用模型替身与临时数据。
 
@@ -27,16 +27,26 @@ python tools/run_offline_checks.py --require-node
 | 手机音频 | 上传格式、录音长度与转码接口 |
 | 前端交互 | 会话与媒体界面、地图门口、巡逻点选择、迎宾照片确认 |
 
-GitHub Actions 使用相同入口，并构建一次运行发布包。
+新增安装与迁移检查覆盖：从其他工作目录启动、新旧入口、网页静态资源、数据目录选择、现场地图和配置优先级。
+
+GitHub Actions 在 Python 3.11 和 3.13 上运行相同入口，构建 wheel 和设备运行包，再使用安装后的包启动 Mock 服务。
+
+```bash
+python -m pip wheel . --no-deps -w dist
+python tools/smoke_web.py
+python tools/smoke_web.py --legacy
+# 安装 wheel 到独立环境后，再用该环境验证（不使用源码路径）
+python tools/smoke_web.py --installed --python /path/to/environment/python
+```
 
 ## 手工模型评估
 
 下列脚本不属于离线检查，会访问模型或真实输入，应先检查其配置和参数：
 
-- `test/test_service.py`：模型服务连通与功能检查。
-- `test/test_reference_match.py`、`test/test_minicpm_reference_exact.py`：参考图比对评估。
-- `test/eval_*.py`：对话、导航、视觉或会话相关场景评估。
-- `test/check_mobile_live.py`：已部署网页与手机音频入口检查。
+- `tests/test_service.py`：模型服务连通与功能检查。
+- `tests/test_reference_match.py`、`tests/test_minicpm_reference_exact.py`：参考图比对评估。
+- `tests/eval_*.py`：对话、导航、视觉或会话相关场景评估。
+- `tests/check_mobile_live.py`：已部署网页与手机音频入口检查。
 
 部分评估脚本需要自行准备图片、服务地址或现场数据。离线测试通过不代表这些评估已完成。
 

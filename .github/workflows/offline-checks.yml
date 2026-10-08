@@ -11,15 +11,24 @@ permissions:
 jobs:
   checks:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ['3.11', '3.13']
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.13'
+          python-version: ${{ matrix.python }}
           cache: pip
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - run: python -m pip install -r requirements-dev.txt
+      - run: python -m pip install -e ".[dev]" wheel
       - run: python tools/run_offline_checks.py --require-node
       - run: python tools/build_pi_release.py
+      - run: python -m pip wheel . --no-deps -w dist
+      - name: Check installed wheel outside source directory
+        run: |
+          python -m venv --system-site-packages .codex-tmp/wheel-env
+          .codex-tmp/wheel-env/bin/python -m pip install --no-deps --force-reinstall dist/*.whl
+          python tools/smoke_web.py --installed --python "$PWD/.codex-tmp/wheel-env/bin/python"

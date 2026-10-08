@@ -10,11 +10,9 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def main():
     config = json.loads((ROOT / 'deploy/raspberrypi/runtime-files.json').read_text(encoding='utf-8'))
-    names = config['files'] + [
-        p.relative_to(ROOT).as_posix()
-        for p in sorted((ROOT / config['icon_directory']).iterdir())
-        if p.suffix == '.svg' or p.name == 'FONT-AWESOME-LICENSE.txt'
-    ]
+    names = config['files']
+    if len(names) != len(set(names)):
+        raise ValueError('Duplicate release entries')
     output = ROOT / 'dist'
     output.mkdir(exist_ok=True)
     manifest = {}
@@ -24,7 +22,7 @@ def main():
             if not path.is_relative_to(ROOT) or not path.is_file():
                 raise ValueError(f'Invalid release file: {name}')
             data = path.read_bytes()
-            if path.suffix in {'.py', '.html', '.js', '.sh', '.json', '.svg', '.webmanifest', '.txt'}:
+            if path.suffix in {'.py', '.html', '.js', '.sh', '.json', '.svg', '.webmanifest', '.txt', '.css', '.toml', '.md'}:
                 data = data.replace(b'\r\n', b'\n')
             info = tarfile.TarInfo(name)
             info.mode = 0o755 if path.suffix == '.sh' else 0o644

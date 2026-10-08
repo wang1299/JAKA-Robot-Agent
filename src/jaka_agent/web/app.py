@@ -1,0 +1,35 @@
+"""Load configuration and start the robot web service."""
+from __future__ import annotations
+import jaka_agent.diagnostics as diagnostics
+import argparse
+
+def main():
+    parser = argparse.ArgumentParser(description="JAKA Robot Agent Web 服务")
+    parser.add_argument("--host", default="0.0.0.0")
+    parser.add_argument("--port", type=int, default=8080)
+    parser.add_argument("--mock", action="store_true", help="不连接相机/模型/麦克风")
+    args = parser.parse_args()
+
+    from jaka_agent.models.config import load_model_config
+    model_config = load_model_config()
+    for key, value in sorted(model_config.items()):
+        diagnostics.LOGGER.info("[models] %s=%s", key, value)
+
+    import jaka_agent.web.handler as web_handler
+    import jaka_agent.web.server as web_server
+    import jaka_agent.web.state as web_state
+    state = web_state.RobotWebState(mock=args.mock)
+    server = web_server.RobotWebServer((args.host, args.port), web_handler.RobotWebHandler, state)
+    print(f"[web] JAKA Vision 正在监听: http://{args.host}:{args.port}")
+    if args.host == "0.0.0.0":
+        print(f"[web] 远程浏览器请访问: http://<树莓派IP>:{args.port}")
+        print(f"[web] SSH 转发后请访问: http://127.0.0.1:{args.port}")
+    print(f"[web] mode={'mock' if args.mock else 'hardware'} | Ctrl+C 退出")
+    diagnostics.LOGGER.info("[web] backend log file: %s", diagnostics.LOG_PATH)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\n[web] 正在关闭")
+    finally:
+        server.server_close()
+        state.close()

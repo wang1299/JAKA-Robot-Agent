@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jaka-robot-agent"
+version = "0.2.0"
+description = "Multimodal task planning and execution for JAKA mobile robots"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = ["openai==2.53.0", "Pillow==11.1.0", "requests==2.32.3"]
+
+[project.optional-dependencies]
+dev = ["numpy==2.1.3"]
+vision = ["numpy", "opencv-python", "dashscope"]
+audio = ["numpy", "sounddevice", "sherpa_onnx"]
+mapping = ["numpy", "pyzmq"]
+
+[project.scripts]
+jaka-agent = "jaka_agent.web.app:main"
+jaka-plan = "jaka_agent.cli.entry:main"
+jaka-explore = "jaka_agent.mapping.explore:main"
+jaka-mapping-bridge = "jaka_agent.mapping.bridge:main"
+jaka-collect = "jaka_agent.mapping.collector:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["jaka_agent*"]
+namespaces = false
+
+[tool.setuptools.package-data]
+jaka_agent = [
+  "resources/*.json", "resources/maps/*.json", "resources/maps/*.png",
+  "web/templates/*.html", "web/static/*.js", "web/static/*.svg",
+  "web/static/*.webmanifest", "web/static/css/*.css", "web/static/js/*.js",
+  "web/static/map_icons/*.svg", "web/static/map_icons/*.txt"
+]

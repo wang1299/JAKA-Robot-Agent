@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0d1517">
+  <title>拟物体三维地图</title>
+  <link rel="stylesheet" href="/static/css/scene.css">
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.152.2/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.152.2/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">◇</div>
+        <div class="brand-text">
+          <strong>拟物体三维地图</strong>
+          <span id="sourceName">正在读取场景图…</span>
+        </div>
+      </div>
+      <div class="toolbar" aria-label="三维视图工具栏">
+        <select id="objectSelect" class="select" aria-label="选择拟物体">
+          <option value="">选择拟物体以聚焦</option>
+        </select>
+        <div class="toolbar-group views">
+          <button id="overviewButton" class="control" type="button">全景</button>
+          <button id="topButton" class="control" type="button">俯视</button>
+          <button id="frontButton" class="control" type="button">正视</button>
+          <button id="sideButton" class="control" type="button">侧视</button>
+          <button id="focusButton" class="control" type="button" title="聚焦所选拟物体">聚焦</button>
+        </div>
+        <div class="toolbar-group">
+          <button id="labelsButton" class="control" type="button" aria-pressed="true">标签</button>
+          <button id="relationsButton" class="control" type="button" aria-pressed="false">关系</button>
+          <button id="gridButton" class="control" type="button" aria-pressed="true">网格</button>
+          <button id="robotButton" class="control" type="button" aria-pressed="true">机器人</button>
+          <button id="infoButton" class="control" type="button" aria-pressed="true" title="显示或隐藏信息栏">信息</button>
+        </div>
+        <div class="toolbar-group">
+          <button id="loadButton" class="control" type="button" title="载入本地 JSON">载入</button>
+          <button id="saveButton" class="control primary" type="button" title="保存当前画面为 PNG">保存</button>
+        </div>
+        <input id="jsonFile" type="file" accept="application/json,.json">
+      </div>
+    </header>
+
+    <main id="main" class="main">
+      <section id="stage" class="stage" aria-label="可拖动的拟物体三维地图">
+        <canvas id="sceneCanvas" aria-label="拟物体三维框、标签、关系和机器人轨迹"></canvas>
+        <div class="stage-hud instructions">
+          <div class="hud-card"><strong>自由相机</strong><span>左键旋转 · 右键平移 · 滚轮缩放 · 双击物体聚焦</span></div>
+        </div>
+        <div id="cameraState" class="stage-hud hud-card camera-state">camera: --</div>
+        <div id="loading" class="stage-hud loading">正在加载三维拟物体地图…</div>
+      </section>
+
+      <aside id="info" class="info" aria-label="拟物体信息">
+        <div id="infoEmpty" class="info-empty">点击三维框或从顶部列表选择物体<br>可查看属性、坐标和空间关系</div>
+        <div id="infoContent" hidden>
+          <div class="info-head">
+            <div class="info-title"><strong id="infoName">目标物体</strong><span id="infoMeta">#--</span></div>
+            <span id="infoStatus" class="badge">已选择</span>
+          </div>
+          <dl id="propertyList" class="property-list"></dl>
+          <div class="section">
+            <strong>物体关系</strong>
+            <div id="relationList"></div>
+          </div>
+        </div>
+      </aside>
+    </main>
+
+    <footer id="legend" class="footer">
+      <span id="objectCount">0 个三维物体框</span>
+      <span>·</span>
+      <span>数据坐标：X / Y / Z</span>
+      <span class="footer-spacer"></span>
+    </footer>
+  </div>
+
+  <script type="module" src="/static/js/scene.js"></script>
+</body>
+</html>

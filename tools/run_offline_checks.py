@@ -27,8 +27,8 @@ def flatten(suite):
 
 def run_python(output):
     sys.path.insert(0, str(ROOT))
-    sys.path.insert(0, str(ROOT / "test"))
-    files = [p for p in sorted((ROOT / "test").glob("test_*.py"))
+    sys.path.insert(0, str(ROOT / "src"))
+    files = [p for p in sorted((ROOT / "tests").glob("test_*.py"))
              if p.name not in MANUAL | HISTORY_ONLY]
     original_connect = socket.socket.connect
 
@@ -48,7 +48,7 @@ def run_python(output):
                 patch.object(socket.socket, "connect", loopback_only):
             tests = {}
             for path in files:
-                for test in flatten(unittest.defaultTestLoader.loadTestsFromName(path.stem)):
+                for test in flatten(unittest.defaultTestLoader.loadTestsFromName("tests." + path.stem)):
                     tests.setdefault(test.id(), test)
             result = unittest.TextTestRunner(stream=log, verbosity=2).run(
                 unittest.TestSuite(tests.values()))
@@ -67,7 +67,7 @@ def main():
     parser.add_argument("--require-node", action="store_true", help="Fail if Node.js is unavailable")
     args = parser.parse_args()
     os.chdir(ROOT)
-    output = ROOT / "test/artifacts/offline-checks"
+    output = ROOT / "tests/artifacts/offline-checks"
     output.mkdir(parents=True, exist_ok=True)
     python_result = run_python(output)
     print(f"Python: {python_result['tests_run']} tests; "
@@ -77,7 +77,7 @@ def main():
     frontend = []
     ok = python_result["successful"]
     if node:
-        for script in sorted((ROOT / "test").glob("*.cjs")):
+        for script in sorted((ROOT / "tests").glob("*.cjs")):
             try:
                 result = subprocess.run([node, str(script)], cwd=ROOT, capture_output=True,
                                         text=True, encoding="utf-8", errors="replace", timeout=60)

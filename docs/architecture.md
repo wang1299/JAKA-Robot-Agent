@@ -13,19 +13,23 @@ JAKA Robot Agent 将自然语言需求转换为机器人技能计划。模型负
 
 ## 模块分工
 
-| 模块 | 职责 |
-| --- | --- |
-| `robot_agent.py` | Agent 循环、工具 schema、参数验证、历史清理及工具输出处理 |
-| `robot_agent_map.py` | 地图版本、目标查询、房间及门口语义证据 |
-| `robot_skills.py` | 五类技能的参数、过程、完成条件与失败策略；只生成计划 |
-| `robot_web.py` | HTTP 接口、会话协调、任务管理、地图、视觉与语音入口 |
-| `robot_web_routing.py` | 问答与任务相关路由辅助逻辑 |
-| `qwen_planner.py` | 任务规划、视觉分析、导航驱动与执行器 |
-| `robot_runtime.py` | 任务取消、驱动包装、共享相机和运行资源生命周期 |
-| `robot_memory.py` | SQLite 会话、消息、摘要与任务记录 |
-| `robot_media.py` | 媒体存储、索引及会话关联 |
+所有运行代码都位于 `src/jaka_agent/`；根目录的 `robot_web.py` 和 `qwen_planner.py` 只转交启动命令。
 
-`robot_web.py` 仍包含较多任务业务逻辑。增加新硬件或技能时，应先沿现有接口扩展并增加契约测试，避免绕过任务确认与取消入口。
+| 包内模块 | 职责 |
+| --- | --- |
+| `agent/runner.py`、`skills.py`、`map_evidence.py` | 工具协议、技能参数与地图证据 |
+| `tasks/cards.py`、`planning.py`、`validation.py` | 待确认任务卡、模型规划与校验 |
+| `tasks/manager.py`、`runtime.py`、`executor.py` | 任务状态、取消、资源生命周期与执行 |
+| `tasks/find_object.py`、`welcome.py`、`patrol.py` | 寻物、迎宾与巡逻业务流程 |
+| `hardware/navigation.py`、`camera.py`、`voice.py` | 底盘协议、相机与语音设备适配 |
+| `models/config.py`、`runtime.py`、`vision.py`、`person_match.py` | 模型路由、调用、视觉与人物外观比对 |
+| `storage/memory.py`、`media.py` | SQLite 会话、消息、摘要和媒体关联 |
+| `mapping/catalog.py`、`manager.py`、`bridge.py` | 地图读取、标定与建图协调 |
+| `web/handler.py`、`state.py`、`app.py` | HTTP 接口、各服务组合与启动 |
+| `web/templates/`、`web/static/css/`、`web/static/js/` | 页面结构、样式与交互脚本 |
+| `paths.py`、`resources/` | 可写数据位置和随包分发的只读资源 |
+
+`RobotTaskManager` 组合任务卡和三个业务流程模块，统一管理确认、取消和执行状态；`RobotWebState` 组合地图、设备、Agent 与视觉服务。新增技能应通过技能契约生成待确认任务，不绕过确认和取消入口。
 
 ## 地图与现场观察
 
@@ -37,10 +41,10 @@ JAKA Robot Agent 将自然语言需求转换为机器人技能计划。模型负
 
 技能工具创建的是待确认计划，不能直接驱动硬件。任务属于发起会话，参考图和执行结果不能串入其他会话。迎宾另外设有现场照片确认阶段，校验对应会话、任务与确认标识，拒绝后继续等待。
 
-会话导入与历史恢复不能重新授权旧动作。数据库和现场媒体默认保存在忽略目录中，不进入源码或运行发布包。
+会话导入与历史恢复不能重新授权旧动作。数据库和现场媒体默认保存在工作目录的 `data/` 或已有本地数据目录中，不进入源码或运行发布包。
 
 ## 模型与设备边界
 
-Web 入口读取 `model_config.json`，显式环境变量优先。当前配置将 Agent 决策与视觉服务分开，也可通过配置接入兼容服务；不同模型的工具调用能力需要独立验证。
+Web 和规划命令入口先读取现场或包内模型配置，显式环境变量优先。当前配置将 Agent 决策与视觉服务分开，也可通过配置接入兼容服务；不同模型的工具调用能力需要独立验证。
 
 底盘通过 JAKA TCP/HTTP 驱动访问，相机通过 Orbbec SDK 采集。建图服务经 ZeroMQ 交换数据，`deploy/server/` 提供场景图适配脚本。Mock 模式提供界面和任务状态测试路径，不模拟完整物理环境或大模型推理。

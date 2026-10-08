@@ -40,7 +40,7 @@ obs_ann*.png
 !docs/demos/DEMO-1-2.mp4
 !docs/demos/DEMO-2-1.mp4
 !docs/demos/DEMO-2-2.mp4
-test/artifacts/
+tests/artifacts/
 docs/*.pptx
 dist/
 output/
@@ -53,3 +53,10 @@ archive/
 .agents/
 .DS_Store
 Thumbs.db
+
+# Package builds and installed runtime data
+data/
+build/
+*.egg-info/
+outputs/
+configs/*.local.json
